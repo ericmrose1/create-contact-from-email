@@ -1,0 +1,4 @@
+Architecture: Outlook Office Add-in, add-in-only XML manifest, MessageReadCommandSurface, Office.js ReadItem permission.
+Contact creation strategy: local vCard 3.0 generation. No Graph/MSAL/NAA is used in this build.
+Reason: minimizes security footprint and eliminates Entra application registration while still opening a normal Outlook Contact form for user review/save.
+Host requirement: static HTTPS origin. Replace __HOST__ in manifest.template.xml or use MAKE-MANIFEST.html.
