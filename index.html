@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-store">
+  <title>Create Contact from Email</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <style>
+    :root{font-family:"Segoe UI",Arial,sans-serif;color:#202124;background:#fff}
+    *{box-sizing:border-box} body{margin:0;padding:14px;line-height:1.35}
+    h1{font-size:20px;margin:0 0 4px}.sub{color:#5f6368;font-size:12px;margin-bottom:12px}
+    h2{font-size:15px;margin:18px 0 8px}.status{padding:9px 11px;border:1px solid #d0d7de;border-radius:8px;background:#f6f8fa;margin:10px 0;font-size:12px}
+    .status.error{border-color:#d1242f;background:#fff1f0}.status.ok{border-color:#1a7f37;background:#dafbe1}.status.warn{border-color:#bf8700;background:#fff8c5}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.btn{border:1px solid #8c8c8c;border-radius:6px;background:#fff;padding:8px 11px;font:inherit;cursor:pointer}.btn.primary{background:#0f6cbd;color:#fff;border-color:#0f6cbd;font-weight:600}.btn:disabled{opacity:.5;cursor:not-allowed}
+    .setup{border:1px solid #d0d7de;border-radius:8px;padding:10px;margin:10px 0}.setup input{width:100%;padding:8px;border:1px solid #b8c0c8;border-radius:6px;font:inherit;margin-top:4px}
+    .candidate{border:1px solid #d0d7de;border-radius:8px;padding:9px;margin:8px 0}.candidate-head{display:flex;gap:8px;align-items:flex-start}.candidate-head input{margin-top:3px}.candidate-name{font-weight:600}.muted{color:#6e7781;font-size:12px}.preview{white-space:pre-wrap;font-size:11px;color:#57606a;background:#f6f8fa;border-radius:6px;padding:7px;margin-top:7px;max-height:95px;overflow:auto}
+    .review{border:1px solid #d0d7de;border-radius:8px;padding:10px;margin:10px 0}.review.done{opacity:.7}.badge{display:inline-block;border-radius:999px;padding:2px 7px;font-size:11px;background:#ddf4ff;color:#0969da}.badge.existing{background:#fff8c5;color:#9a6700}.badge.done{background:#dafbe1;color:#1a7f37}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 10px;margin-top:8px}.full{grid-column:1/-1}.field label{font-size:11px;color:#6e7781;display:block;margin-bottom:2px}.field input{width:100%;padding:7px;border:1px solid #b8c0c8;border-radius:6px;font:inherit}
+    .diffs{margin-top:9px;border-top:1px solid #d8dee4;padding-top:8px}.diff{display:grid;grid-template-columns:24px 90px 1fr;gap:6px;align-items:start;font-size:12px;margin:5px 0}.diff .vals{min-width:0}.old{color:#6e7781}.new{font-weight:600;word-break:break-word}.note{font-size:11px;color:#6e7781;margin-top:9px}
+    @media(max-width:520px){.grid{grid-template-columns:1fr}.diff{grid-template-columns:24px 74px 1fr}}
+  </style>
+</head>
+<body>
+  <h1>Create Contact from Email</h1>
+  <div class="sub">Finds people in the current email chain, lets you select several, and checks your Outlook Contacts before creating or updating anything.</div>
+  <div id="status" class="status">Opening the selected email…</div>
+
+  <div id="authSetup" class="setup" hidden>
+    <b>One-time Microsoft Contacts setup</b>
+    <div class="muted">Enter the Application (client) ID from the Microsoft setup instructions. It is stored only in this browser profile.</div>
+    <input id="clientId" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off">
+    <div class="toolbar"><button id="saveClientId" class="btn primary" type="button">Save Client ID</button></div>
+  </div>
+
+  <section id="candidateSection" hidden>
+    <h2>People found in this email</h2>
+    <div class="toolbar">
+      <button id="selectAll" class="btn" type="button">Select All</button>
+      <button id="selectNone" class="btn" type="button">Clear</button>
+      <button id="scanAgain" class="btn" type="button">Scan Email Again</button>
+    </div>
+    <div id="candidates"></div>
+    <div class="toolbar"><button id="compareSelected" class="btn primary" type="button">Compare Selected with Outlook Contacts</button></div>
+  </section>
+
+  <section id="reviewSection" hidden>
+    <h2>Review contacts</h2>
+    <div id="reviews"></div>
+    <div class="note">The add-in never deletes an existing value because it is missing from an email signature. When a new nonblank value conflicts with an existing nonblank value, replacement is left unchecked until you approve it.</div>
+  </section>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
