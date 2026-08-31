@@ -14,11 +14,17 @@
     .status.error{border-color:#d1242f;background:#fff1f0}.status.ok{border-color:#1a7f37;background:#dafbe1}.status.warn{border-color:#bf8700;background:#fff8c5}
     .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.btn{border:1px solid #8c8c8c;border-radius:6px;background:#fff;padding:8px 11px;font:inherit;cursor:pointer}.btn.primary{background:#0f6cbd;color:#fff;border-color:#0f6cbd;font-weight:600}.btn:disabled{opacity:.5;cursor:not-allowed}
     .setup{border:1px solid #d0d7de;border-radius:8px;padding:10px;margin:10px 0}.setup input{width:100%;padding:8px;border:1px solid #b8c0c8;border-radius:6px;font:inherit;margin-top:4px}
+    #candidateSection{position:sticky;top:0;z-index:30;background:#fff;border-bottom:1px solid #d0d7de;padding:8px 0 10px;margin:0 -14px 12px;padding-left:14px;padding-right:14px;box-shadow:0 3px 8px rgba(0,0,0,.10)}
+    #candidateSection h2{margin:0 0 6px}
+    #candidateSection .toolbar{margin:6px 0}
+    #candidates{max-height:260px;overflow-y:auto;overscroll-behavior:contain;padding-right:3px}
     .candidate{border:1px solid #d0d7de;border-radius:8px;padding:9px;margin:8px 0}.candidate-head{display:flex;gap:8px;align-items:flex-start}.candidate-head input{margin-top:3px}.candidate-name{font-weight:600}.muted{color:#6e7781;font-size:12px}.preview{white-space:pre-wrap;font-size:11px;color:#57606a;background:#f6f8fa;border-radius:6px;padding:7px;margin-top:7px;max-height:95px;overflow:auto}
     .review{border:1px solid #d0d7de;border-radius:8px;padding:10px;margin:10px 0;position:relative}.review.done{opacity:.7}
     .signature-sticky{position:sticky;top:0;z-index:5;background:#fff;border:1px solid #b8c0c8;border-radius:8px;padding:8px;margin:8px 0 10px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
     .signature-sticky .sig-title{font-size:11px;font-weight:700;color:#57606a;margin-bottom:4px;text-transform:uppercase;letter-spacing:.02em}.signature-sticky pre{white-space:pre-wrap;word-break:break-word;margin:0;max-height:150px;overflow:auto;font:11px/1.35 "Segoe UI",Arial,sans-serif;color:#24292f}
-    .field textarea{width:100%;min-height:130px;padding:7px;border:1px solid #b8c0c8;border-radius:6px;font:inherit;resize:vertical}.badge{display:inline-block;border-radius:999px;padding:2px 7px;font-size:11px;background:#ddf4ff;color:#0969da}.badge.existing{background:#fff8c5;color:#9a6700}.badge.done{background:#dafbe1;color:#1a7f37}
+    .field textarea{width:100%;min-height:130px;padding:7px;border:1px solid #b8c0c8;border-radius:6px;font:inherit;resize:vertical}
+    .notes-label-row{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap}.notes-actions{display:flex;gap:6px;flex-wrap:wrap}.mini-btn{border:1px solid #8c959f;background:#f6f8fa;border-radius:5px;padding:4px 8px;font:11px "Segoe UI",Arial,sans-serif;cursor:pointer;color:#24292f}.mini-btn:hover{background:#eef1f4}.notes-field textarea{min-height:160px;cursor:text;user-select:text}.notes-help{margin-top:4px;font-size:11px}
+.badge{display:inline-block;border-radius:999px;padding:2px 7px;font-size:11px;background:#ddf4ff;color:#0969da}.badge.existing{background:#fff8c5;color:#9a6700}.badge.done{background:#dafbe1;color:#1a7f37}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 10px;margin-top:8px}.full{grid-column:1/-1}.field label{font-size:11px;color:#6e7781;display:block;margin-bottom:2px}.field input{width:100%;padding:7px;border:1px solid #b8c0c8;border-radius:6px;font:inherit}
     .diffs{margin-top:9px;border-top:1px solid #d8dee4;padding-top:8px}.diff{display:grid;grid-template-columns:24px 90px 1fr;gap:6px;align-items:start;font-size:12px;margin:5px 0}.diff .vals{min-width:0}.old{color:#6e7781}.new{font-weight:600;word-break:break-word}.note{font-size:11px;color:#6e7781;margin-top:9px}
     @media(max-width:520px){.grid{grid-template-columns:1fr}.diff{grid-template-columns:24px 74px 1fr}}
@@ -26,7 +32,7 @@
 </head>
 <body>
   <h1>Create Contact from Email</h1>
-  <div class="sub"><b>v2.4.1</b> — Finds people in the current email chain, lets you select several, and checks your Outlook Contacts before creating or updating anything.</div>
+  <div class="sub"><b>v2.4.3</b> — Finds people in the current email chain, lets you select several, and checks your Outlook Contacts before creating or updating anything.</div>
   <div id="status" class="status">Opening the selected email…</div>
 
   <div id="authSetup" class="setup" hidden>
@@ -53,6 +59,6 @@
     <div class="note">The add-in never deletes an existing value because it is missing from an email signature. When a new nonblank value conflicts with an existing nonblank value, replacement is left unchecked until you approve it.</div>
   </section>
 
-  <script type="module" src="app.js?v=241"></script>
+  <script type="module" src="app.js?v=242"></script>
 </body>
 </html>
