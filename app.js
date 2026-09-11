@@ -268,6 +268,81 @@ function splitMessage(body,currentName,currentEmail){const text=norm(body);const
   }
   return [...bestByKey.values()].map(x=>x.seg)}
 
+
+
+function inferAnchoredName(sig,email){
+  const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
+  const emailIdx=lines.findIndex(l=>cleanEmail(l)===cleanEmail(email));
+  const stop=emailIdx>=0?emailIdx:lines.length;
+  for(let i=stop-1;i>=Math.max(0,stop-8);i--){if(looksLikePersonName(lines[i]))return lines[i]}
+  return inferPersonName(sig);
+}
+
+function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
+  const lines=norm(body).split("\n").map(x=>x.trim());
+  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
+  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
+  const byEmail=new Map();
+  for(let i=0;i<lines.length;i++){
+    if(isHeader(lines[i]))continue;
+    const email=cleanEmail(lines[i]);
+    if(!email||sameEmail(email,myEmail))continue;
+    // Build a tight block around the visible email address. This is much more reliable in
+    // forwarded/replied chains than depending on Outlook's reconstructed From: headers.
+    let lo=i,hi=i,blankBudget=1;
+    for(let j=i-1;j>=0 && i-j<=10;j--){
+      const v=lines[j];
+      if(isHeader(v)||isDisclaimer(v))break;
+      if(!v){if(blankBudget--<=0)break;continue}
+      lo=j;
+    }
+    blankBudget=1;
+    for(let j=i+1;j<lines.length && j-i<=8;j++){
+      const v=lines[j];
+      if(isHeader(v)||isDisclaimer(v))break;
+      if(!v){if(blankBudget--<=0)break;continue}
+      hi=j;
+    }
+    let chunk=lines.slice(lo,hi+1).filter(Boolean);
+    // Prefer the nearest plausible person's name above the anchored email. This strips
+    // ordinary message prose even when there is no blank line before the signature.
+    let emailLocal=chunk.findIndex(l=>cleanEmail(l)===email);
+    if(emailLocal<0)emailLocal=chunk.length-1;
+    let nameLocal=-1;
+    for(let j=emailLocal-1;j>=Math.max(0,emailLocal-8);j--){if(looksLikePersonName(chunk[j])){nameLocal=j;break}}
+    if(nameLocal>=0)chunk=chunk.slice(nameLocal);
+    else{
+      while(chunk.length>5 && signatureScore(chunk[0])===0)chunk.shift();
+    }
+    while(chunk.length>5 && signatureScore(chunk[chunk.length-1])===0 && signatureScore(chunk[chunk.length-2])===0)chunk.pop();
+    const sig=cleanSignatureText(chunk.join("\n"));
+    const score=norm(sig).split("\n").reduce((t,l)=>t+signatureScore(l),0);
+    if(score<5)continue;
+    const inferred=inferAnchoredName(sig,email);
+    const name=(sameEmail(email,currentEmail)&&looksLikePersonName(currentName||""))?currentName:(inferred||email.split("@")[0]);
+    const parsed=parseContact(name,email,sig);
+    // parseContact will isolate again; preserve the exact anchored signature we just selected.
+    parsed.signature=sig; parsed.personalNotes=sig;
+    const existing=byEmail.get(email);
+    if(!existing||score>existing.score)byEmail.set(email,{score,name,email,text:sig,parsed});
+  }
+  // If the current sender has no email printed in the signature, preserve the legacy segment
+  // method only as a fallback for that sender.
+  if(currentEmail&&!sameEmail(currentEmail,myEmail)&&!byEmail.has(currentEmail.toLowerCase())){
+    const legacy=splitMessage(body,currentName,currentEmail).find(x=>sameEmail(x.email,currentEmail));
+    if(legacy){
+      const parsed=parseContact(legacy.name,legacy.email,legacy.text);
+      const actualSigName=inferAnchoredName(parsed.signature,"");
+      const sigName=String(actualSigName||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+      const curName=String(currentName||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+      // Only keep this weaker fallback if the signature itself clearly belongs to the
+      // current sender; otherwise it is safer to omit it than attach someone else's block.
+      if(parsed.signature && curName && sigName===curName)byEmail.set(currentEmail.toLowerCase(),{score:1,name:legacy.name,email:legacy.email,text:legacy.text,parsed});
+    }
+  }
+  return [...byEmail.values()].map(x=>({name:x.name,email:x.email,text:x.text,parsed:x.parsed}));
+}
+
 function renderCandidates(){const box=$("candidates");box.innerHTML="";candidates.forEach((c,i)=>{const el=document.createElement("div");el.className="candidate";el.innerHTML=`<div class="candidate-head"><input type="checkbox" data-candidate="${i}" checked><div><div class="candidate-name">${html(c.name||"Unknown sender")}</div><div class="muted">${html(c.email||"No email found")}</div></div></div><div class="preview">${html(c.parsed.signature||"No signature block confidently found")}</div>`;box.appendChild(el)});$("candidateSection").hidden=false}
 function html(s){return String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]))}
 function htmlBodyToText(htmlText){
@@ -308,8 +383,7 @@ async function scan(){try{
   const item=Office.context.mailbox.item;if(!item||item.itemType!==Office.MailboxEnums.ItemType.Message)throw new Error("Open or select an email message first.");
   const from=item.from||{},body=await readBody(item);
   const myEmail=(Office.context.mailbox.userProfile?.emailAddress||"").toLowerCase();
-  const segments=splitMessage(body,from.displayName||"",from.emailAddress||"");
-  candidates=segments.filter(x=>!sameEmail(x.email,myEmail)).map(x=>({...x,parsed:parseContact(x.name,x.email,x.text)}));
+  candidates=anchoredSignatureCandidates(body,from.displayName||"",from.emailAddress||"",myEmail);
   renderCandidates();
   status(`Found ${candidates.length} possible contact${candidates.length===1?"":"s"}. Your own messages/signature are ignored. Select the people you want to process.`,"ok")
 }catch(e){status(e.message||String(e),"error")}}
