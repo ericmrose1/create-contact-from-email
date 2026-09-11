@@ -151,36 +151,84 @@ function company(sig,name,senderEmail,site){
 const US_STATES=new Set(["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC"]);
 function usCountry(state){return US_STATES.has(String(state||"").toUpperCase())?"United States":""}
 function address(sig){
-  const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
+  const raw=norm(sig).replace(/[\u200B-\u200D\uFEFF]/g,"");
+  const lines=raw.split("\n").map(x=>x.replace(/\s+/g," ").trim()).filter(Boolean);
   const streetWord=/\b(street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|loop|terrace|ter\.?|suite|ste\.?|floor|fl\.?|bldg|building|p\.?o\.?\s*box)\b/i;
-  const cityStateZip=/^([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/;
-  for(let i=0;i<lines.length;i++){
-    const line=lines[i];
-    const parts=line.split(/\s*[•|]\s*/).map(x=>x.trim()).filter(Boolean);
-    if(parts.length>=2){
-      const last=parts[parts.length-1].match(cityStateZip);
-      if(last){
-        const streetParts=parts.slice(0,-1).filter(x=>/\d/.test(x)||streetWord.test(x));
-        return{street:streetParts.join("\n"),city:last[1].trim(),state:last[2],postalCode:last[3],countryOrRegion:usCountry(last[2])};
+  const cityStateZip=/([A-Za-z][A-Za-z .'-]{1,60}?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)/g;
+
+  // Strong combined pattern for signatures flattened into one line, e.g.
+  // "2657 Aero Loop Sheridan, WY 82801". This avoids treating the street as part of the city.
+  const flatAll=raw.replace(/[\n•|]+/g," ").replace(/\s+/g," ").trim();
+  const combined=flatAll.match(/(\d{1,6}\s+[A-Za-z0-9 .,'#&\/-]+?\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|loop|terrace|ter\.?)(?:\s+(?:suite|ste\.?|bldg|building|floor|fl\.?)\s*[A-Za-z0-9-]+)?)\s+([A-Za-z][A-Za-z .'-]{1,50}?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)/i);
+  if(combined && US_STATES.has(combined[3].toUpperCase())){
+    return {street:combined[1].trim(),city:combined[2].trim(),state:combined[3].toUpperCase(),postalCode:combined[4],countryOrRegion:"United States"};
+  }
+
+  // First, find a city/state/ZIP anywhere in the signature. Outlook HTML often collapses
+  // what visually appear to be separate address lines into one line of text.
+  let location=null;
+  for(const line of lines){
+    cityStateZip.lastIndex=0;
+    let m;
+    while((m=cityStateZip.exec(line))){
+      if(US_STATES.has(m[2].toUpperCase())){
+        location={line,city:m[1].trim().replace(/^[,;|•\s]+|[,;|•\s]+$/g,""),state:m[2].toUpperCase(),postalCode:m[3],index:m.index};
+        break;
       }
     }
-    let m=line.match(/^(.*\d.*?),\s*([A-Za-z .'-]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
-    if(m&&streetWord.test(m[1]))return{street:m[1].trim(),city:m[2].trim(),state:m[3],postalCode:m[4],countryOrRegion:usCountry(m[3])};
-    m=line.match(/^(.*?)\s*[|•]\s*([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
-    if(m&&/\d/.test(m[1]))return{street:m[1].trim(),city:m[2].trim(),state:m[3],postalCode:m[4],countryOrRegion:usCountry(m[3])};
-    m=line.match(cityStateZip);
-    if(m){
-      let street="";
-      for(let j=i-1;j>=Math.max(0,i-3);j--){
-        const prev=lines[j];
-        if(/^from:|^sent:|^to:|^cc:|^subject:/i.test(prev))break;
-        if((/^\d{1,6}\s+/.test(prev)||/p\.?o\.?\s*box/i.test(prev))&&(streetWord.test(prev)||/\d/.test(prev))){street=prev+(street?"\n"+street:"");}
-        else if(street)break;
+    if(location)break;
+  }
+
+  // If line-by-line matching failed, search the complete signature with separators normalized.
+  if(!location){
+    const flat=raw.replace(/[•|]/g," \n ").replace(/\s+/g," ").trim();
+    cityStateZip.lastIndex=0;
+    let m;
+    while((m=cityStateZip.exec(flat))){
+      if(US_STATES.has(m[2].toUpperCase())){
+        location={line:flat,city:m[1].trim().replace(/^[,;|•\s]+|[,;|•\s]+$/g,""),state:m[2].toUpperCase(),postalCode:m[3],index:m.index,flat:true};
+        break;
       }
-      return{street,city:m[1].trim(),state:m[2],postalCode:m[3],countryOrRegion:usCountry(m[2])};
     }
   }
-  return{street:"",city:"",state:"",postalCode:"",countryOrRegion:""}
+
+  if(!location)return{street:"",city:"",state:"",postalCode:"",countryOrRegion:""};
+
+  let street="";
+  const locLineIndex=lines.findIndex(l=>l===location.line);
+
+  // Same-line street, e.g. "2657 Aero Loop Sheridan, WY 82801".
+  if(!location.flat && location.index>0){
+    const before=location.line.slice(0,location.index).replace(/[•|,;\s]+$/g,"").trim();
+    if(/\d/.test(before)&&streetWord.test(before))street=before;
+  }
+
+  // Normal multi-line signature: walk backward from city/state/ZIP for the street line(s).
+  if(!street && locLineIndex>=0){
+    const picked=[];
+    for(let j=locLineIndex-1;j>=Math.max(0,locLineIndex-4);j--){
+      const prev=lines[j];
+      if(/^from:|^sent:|^to:|^cc:|^bcc:|^subject:/i.test(prev))break;
+      const addressLike=(/^\d{1,6}\s+/.test(prev)||/p\.?o\.?\s*box/i.test(prev))&&(streetWord.test(prev)||/\d/.test(prev));
+      if(addressLike)picked.unshift(prev);
+      else if(picked.length)break;
+    }
+    street=picked.join("\n");
+  }
+
+  // Last-resort extraction from flattened HTML text immediately before the city/state/ZIP.
+  if(!street){
+    const flat=raw.replace(/[\n•|]+/g," ").replace(/\s+/g," ").trim();
+    const locRx=new RegExp(location.city.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+",?\\s+"+location.state+"\\s+"+location.postalCode.replace("-","\\-"),"i");
+    const lm=flat.match(locRx);
+    if(lm){
+      const prefix=flat.slice(0,lm.index).slice(-180);
+      const sm=prefix.match(/(\d{1,6}\s+[A-Za-z0-9 .,'#&\/-]+?\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|loop|terrace|ter\.?)\b(?:\s+(?:suite|ste\.?|bldg|building|floor|fl\.?)\s*[A-Za-z0-9-]+)?)[,;\s]*$/i);
+      if(sm)street=sm[1].trim();
+    }
+  }
+
+  return{street,city:location.city,state:location.state,postalCode:location.postalCode,countryOrRegion:"United States"};
 }
 function signatureScore(line){let s=0;if(cleanEmail(line))s+=3;if(phoneTokens(line).length)s+=2;if(/\b(?:www\.|https?:\/\/)/i.test(line))s+=2;if(/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))s+=2;if(/^\d{1,6}\s+/.test(line))s+=1;const low=" "+line.toLowerCase();if(COMPANY_WORDS.some(w=>low.includes(w)))s+=2;if(TITLE_WORDS.some(w=>low.includes(w)))s+=1;if(looksLikePersonName(line))s+=1;return s}
 function isolateSignature(segmentText,senderEmail){
@@ -405,20 +453,44 @@ function signatureContainerScore(text,email){
   return score;
 }
 function findBestHtmlSignatureContainer(anchor,email){
-  let node=anchor;
-  let best=null;
-  for(let depth=0;node&&depth<9;depth++,node=node.parentElement){
+  // Prefer a complete signature table. Most Outlook signatures are HTML tables and the
+  // mailto link may live several nested cells below the name/address/phones.
+  const tables=[];
+  let t=anchor.closest?anchor.closest("table"):null;
+  let hops=0;
+  while(t&&hops<4){
+    const text=visibleSignatureTextFromNode(t);
+    const lines=norm(text).split("\n").map(x=>x.trim()).filter(Boolean);
+    const score=signatureContainerScore(text,email);
+    if(score>-999 && lines.length>=3 && lines.length<=30)tables.push({node:t,text,score:score+8});
+    t=t.parentElement?t.parentElement.closest("table"):null;
+    hops++;
+  }
+  if(tables.length){
+    tables.sort((a,b)=>b.score-a.score || b.text.length-a.text.length);
+    return tables[0];
+  }
+
+  // Fallback for signatures built from DIV/SPAN blocks instead of tables. Prefer the
+  // broadest compact ancestor that still looks signature-like, rather than the smallest
+  // ancestor containing only the email link.
+  let node=anchor,best=null;
+  for(let depth=0;node&&depth<10;depth++,node=node.parentElement){
     if(!node||!node.textContent)continue;
     const tag=(node.tagName||"").toLowerCase();
     if(["body","html"].includes(tag))break;
     const text=visibleSignatureTextFromNode(node);
+    const lines=norm(text).split("\n").map(x=>x.trim()).filter(Boolean);
     const score=signatureContainerScore(text,email);
-    if(score>-999 && (!best||score>best.score))best={node,text,score};
-    // Signature tables usually become clear within a few ancestors; don't climb into the whole message.
-    if(best&&best.score>=14&&text.split("\n").length>=5)break;
+    if(score>-999 && lines.length<=30){
+      const completeness=(phones(text).businessPhone||phones(text).mobilePhone?5:0)+(address(text).state?5:0)+(inferPersonName(text)?2:0);
+      const candidate={node,text,score:score+completeness,lines:lines.length};
+      if(!best || candidate.score>best.score || (candidate.score===best.score&&candidate.lines>best.lines))best=candidate;
+    }
   }
   return best;
 }
+
 function htmlSignatureCandidates(html,currentName,currentEmail,myEmail){
   const out=new Map();
   try{
