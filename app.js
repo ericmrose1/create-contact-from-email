@@ -243,6 +243,15 @@ function parseContact(senderName,senderEmail,segmentText){
   const site=website(sig,senderEmail);return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig),email:senderEmail||""},phones(sig),{businessHomePage:site},address(sig),{signature:sig,personalNotes:sig})
 }
 
+function parseContactFromSignature(senderName,senderEmail,signatureText){
+  const sig=cleanSignatureText(signatureText);
+  const inferred=inferPersonName(sig);
+  const senderLooksHuman=looksLikePersonName(senderName||"");
+  const resolvedName=senderLooksHuman?senderName:(inferred||senderName||"");
+  const site=website(sig,senderEmail);
+  return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig),email:senderEmail||""},phones(sig),{businessHomePage:site},address(sig),{signature:sig,personalNotes:sig});
+}
+
 function sameEmail(a,b){return cleanEmail(a)&&cleanEmail(a)===cleanEmail(b)}
 function cleanSignatureText(sig){
   return norm(sig).split("\n").map(x=>x.trim()).filter(Boolean).filter(line=>{
@@ -345,36 +354,101 @@ function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
 
 function renderCandidates(){const box=$("candidates");box.innerHTML="";candidates.forEach((c,i)=>{const el=document.createElement("div");el.className="candidate";el.innerHTML=`<div class="candidate-head"><input type="checkbox" data-candidate="${i}" checked><div><div class="candidate-name">${html(c.name||"Unknown sender")}</div><div class="muted">${html(c.email||"No email found")}</div></div></div><div class="preview">${html(c.parsed.signature||"No signature block confidently found")}</div>`;box.appendChild(el)});$("candidateSection").hidden=false}
 function html(s){return String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]))}
-function htmlBodyToText(htmlText){
+function visibleSignatureTextFromNode(node){
   try{
-    const doc=new DOMParser().parseFromString(htmlText||"","text/html");
-    doc.querySelectorAll("script,style,noscript").forEach(n=>n.remove());
-    doc.querySelectorAll("a").forEach(a=>{
+    const clone=node.cloneNode(true);
+    clone.querySelectorAll("script,style,noscript").forEach(n=>n.remove());
+    clone.querySelectorAll("a").forEach(a=>{
       const href=(a.getAttribute("href")||"").trim();
       let visible=(a.textContent||"").replace(/\s+/g," ").trim();
       if(!visible){
         if(/^mailto:/i.test(href)) visible=decodeURIComponent(href.replace(/^mailto:/i,"").split("?")[0]);
         else if(/^tel:/i.test(href)) visible=decodeURIComponent(href.replace(/^tel:/i,"").split("?")[0]);
-        else if(/^https?:/i.test(href)){ const decoded=decodeProofpointUrl(href); if(!isJunkResourceUrl(decoded)) visible=normalizeWebsiteUrl(decoded); }
+        else if(/^https?:/i.test(href)){const decoded=decodeProofpointUrl(href);if(!isJunkResourceUrl(decoded)) visible=normalizeWebsiteUrl(decoded)}
       }
-      if(isJunkResourceUrl(visible))visible="";
-      a.replaceWith(doc.createTextNode(visible?` ${visible} `:" "));
+      a.replaceWith(clone.ownerDocument.createTextNode(visible?` ${visible} `:" "));
     });
-    doc.querySelectorAll("img").forEach(img=>{
-      const alt=(img.getAttribute("alt")||img.getAttribute("title")||"").trim();
+    clone.querySelectorAll("img").forEach(img=>{
+      const alt=(img.getAttribute("alt")||img.getAttribute("title")||"").replace(/\s+/g," ").trim();
       const safeAlt=isJunkResourceUrl(alt)?"":alt;
-      img.replaceWith(doc.createTextNode(safeAlt?` ${safeAlt} `:" "));
+      img.replaceWith(clone.ownerDocument.createTextNode(safeAlt?` ${safeAlt} `:" "));
     });
-    doc.querySelectorAll("br").forEach(br=>br.replaceWith(doc.createTextNode("\n")));
-    doc.querySelectorAll("p,div,li,tr,table,blockquote,td").forEach(el=>{el.appendChild(doc.createTextNode("\n"))});
-    return norm(doc.body.textContent||"").replace(/[\u200B-\u200D\uFEFF]/g,"").replace(/\n[ \t]+/g,"\n").replace(/\n{3,}/g,"\n\n");
+    clone.querySelectorAll("br").forEach(br=>br.replaceWith(clone.ownerDocument.createTextNode("\n")));
+    clone.querySelectorAll("tr,p,div,li,table,blockquote").forEach(el=>el.appendChild(clone.ownerDocument.createTextNode("\n")));
+    // Separate table cells with a space rather than a blank line; this preserves same-row phone labels.
+    clone.querySelectorAll("td,th").forEach(el=>el.appendChild(clone.ownerDocument.createTextNode(" ")));
+    return norm(clone.textContent||"")
+      .replace(/[\u200B-\u200D\uFEFF]/g,"")
+      .split("\n")
+      .map(x=>x.replace(/[ \t]+/g," ").trim())
+      .filter(Boolean)
+      .join("\n");
   }catch(_){return ""}
+}
+function htmlBodyToText(htmlText){
+  try{
+    const doc=new DOMParser().parseFromString(htmlText||"","text/html");
+    return visibleSignatureTextFromNode(doc.body);
+  }catch(_){return ""}
+}
+function signatureContainerScore(text,email){
+  const t=norm(text);
+  if(!t||!sameEmail(cleanEmail(t),email) && !t.toLowerCase().includes(String(email||"").toLowerCase()))return -999;
+  const lines=t.split("\n").map(x=>x.trim()).filter(Boolean);
+  let score=lines.reduce((sum,l)=>sum+signatureScore(l),0);
+  if(address(t).state)score+=4;
+  const ph=phones(t);if(ph.businessPhone||ph.mobilePhone)score+=4;
+  if(inferPersonName(t))score+=2;
+  if(lines.length>=4&&lines.length<=18)score+=3;
+  if(lines.length>30)score-=10;
+  if(/^(from|sent|to|cc|subject):/im.test(t))score-=12;
+  return score;
+}
+function findBestHtmlSignatureContainer(anchor,email){
+  let node=anchor;
+  let best=null;
+  for(let depth=0;node&&depth<9;depth++,node=node.parentElement){
+    if(!node||!node.textContent)continue;
+    const tag=(node.tagName||"").toLowerCase();
+    if(["body","html"].includes(tag))break;
+    const text=visibleSignatureTextFromNode(node);
+    const score=signatureContainerScore(text,email);
+    if(score>-999 && (!best||score>best.score))best={node,text,score};
+    // Signature tables usually become clear within a few ancestors; don't climb into the whole message.
+    if(best&&best.score>=14&&text.split("\n").length>=5)break;
+  }
+  return best;
+}
+function htmlSignatureCandidates(html,currentName,currentEmail,myEmail){
+  const out=new Map();
+  try{
+    const doc=new DOMParser().parseFromString(html||"","text/html");
+    const anchors=[...doc.querySelectorAll('a[href^="mailto:" i]')];
+    for(const a of anchors){
+      const href=(a.getAttribute("href")||"");
+      const email=cleanEmail(decodeURIComponent(href.replace(/^mailto:/i,"").split("?")[0])||a.textContent||"");
+      if(!email||sameEmail(email,myEmail))continue;
+      const best=findBestHtmlSignatureContainer(a,email);
+      if(!best||best.score<7)continue;
+      const sig=cleanSignatureText(best.text);
+      const inferred=inferAnchoredName(sig,email);
+      const name=(sameEmail(email,currentEmail)&&looksLikePersonName(currentName||""))?currentName:(inferred||email.split("@")[0]);
+      const parsed=parseContactFromSignature(name,email,sig);
+      const prev=out.get(email);
+      if(!prev||best.score>prev.score)out.set(email,{score:best.score,name,email,text:sig,parsed});
+    }
+  }catch(_){ }
+  return [...out.values()].map(x=>({name:x.name,email:x.email,text:x.text,parsed:x.parsed}));
 }
 function readBody(item){
   return new Promise((resolve,reject)=>{
     item.body.getAsync(Office.CoercionType.Html,r=>{
-      if(r.status===Office.AsyncResultStatus.Succeeded){const t=htmlBodyToText(r.value||"");if(t.trim())return resolve(t)}
-      item.body.getAsync(Office.CoercionType.Text,r2=>r2.status===Office.AsyncResultStatus.Succeeded?resolve(r2.value||""):reject(new Error(r2.error?.message||"Unable to read the email body.")))
+      if(r.status===Office.AsyncResultStatus.Succeeded){
+        const html=r.value||"";
+        const text=htmlBodyToText(html);
+        if(text.trim())return resolve({html,text});
+      }
+      item.body.getAsync(Office.CoercionType.Text,r2=>r2.status===Office.AsyncResultStatus.Succeeded?resolve({html:"",text:r2.value||""}):reject(new Error(r2.error?.message||"Unable to read the email body.")))
     })
   })
 }
@@ -383,7 +457,13 @@ async function scan(){try{
   const item=Office.context.mailbox.item;if(!item||item.itemType!==Office.MailboxEnums.ItemType.Message)throw new Error("Open or select an email message first.");
   const from=item.from||{},body=await readBody(item);
   const myEmail=(Office.context.mailbox.userProfile?.emailAddress||"").toLowerCase();
-  candidates=anchoredSignatureCandidates(body,from.displayName||"",from.emailAddress||"",myEmail);
+  const htmlCandidates=body.html?htmlSignatureCandidates(body.html,from.displayName||"",from.emailAddress||"",myEmail):[];
+  const textCandidates=anchoredSignatureCandidates(body.text,from.displayName||"",from.emailAddress||"",myEmail);
+  // HTML candidates win because they preserve table structure. Add text-only candidates only when HTML did not find that email.
+  const merged=new Map();
+  for(const c of htmlCandidates)merged.set(c.email.toLowerCase(),c);
+  for(const c of textCandidates)if(!merged.has((c.email||"").toLowerCase()))merged.set((c.email||c.name).toLowerCase(),c);
+  candidates=[...merged.values()];
   renderCandidates();
   status(`Found ${candidates.length} possible contact${candidates.length===1?"":"s"}. Your own messages/signature are ignored. Select the people you want to process.`,"ok")
 }catch(e){status(e.message||String(e),"error")}}
