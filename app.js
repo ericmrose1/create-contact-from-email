@@ -1,7 +1,7 @@
 import { createNestablePublicClientApplication, InteractionRequiredAuthError } from "https://cdn.jsdelivr.net/npm/@azure/msal-browser@5.1.0/+esm";
 
 const GRAPH_SCOPES=["Contacts.ReadWrite"];
-const TITLE_WORDS=["project executive","senior project manager","project manager","assistant project manager","project engineer","project coordinator","construction manager","superintendent","estimator","vice president","president","principal","partner","director","manager","architect","engineer","designer","consultant","owner","coordinator"];
+const TITLE_WORDS=["project executive","senior project manager","project manager","assistant project manager","project engineer","project coordinator","construction manager","assistant general manager","general manager","superintendent","estimator","vice president","president","principal","partner","director","manager","architect","engineer","designer","consultant","owner","coordinator"];
 const COMPANY_WORDS=[" llc"," l.l.c"," inc"," corp"," company"," co."," construction"," builders"," building"," architecture"," architects"," engineering"," engineers"," associates"," group"," studio"," mechanical"," electric"," electrical"," plumbing"," design"," contractors"," contractor"," garage"," workshop"," services"," solutions"," systems"," enterprises"," partners"];
 const CREDENTIALS=new Set(["AIA","PE","P.E.","RA","R.A.","LEED","PMP","NCARB","FAIA","SE","S.E."]);
 const FIELD_META={
@@ -25,7 +25,17 @@ function phoneForOutlook(value){
   return ext?`${d}x${ext}`:d;
 }
 function phoneTokens(sig){const re=/(?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]?)\d{3}[\s.\-]\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d+)?/gi,c=[];for(const line of norm(sig).split("\n")){const ms=[...line.matchAll(re)];for(let i=0;i<ms.length;i++){const m=ms[i],prev=i===0?0:ms[i-1].index+ms[i-1][0].length;c.push({context:line.slice(prev,m.index).trim(),value:m[0].trim()})}}return c}
-function phones(sig){const c=phoneTokens(sig);const pick=(rx)=>{const x=c.find(y=>rx.test(y.context));return x?x.value:""};const mobile=pick(/\b(mobile|cell|cellular)\b|(?:^|[|•;\s])(?:m|c)\s*[:.-]?\s*$/i);const fax=pick(/\bfax\b|(?:^|[|•;\s])f\s*[:.-]?\s*$/i);let business=pick(/\b(office|direct|business|phone|tel|telephone)\b|(?:^|[|•;\s])(?:o|d|p|t)\s*[:.-]?\s*$/i);if(!business){const u=c.find(y=>y.value!==mobile&&y.value!==fax);business=u?u.value:""}return{businessPhone:phoneForOutlook(business),mobilePhone:phoneForOutlook(mobile),businessFax:phoneForOutlook(fax)}}
+function phones(sig){
+  const c=phoneTokens(sig);
+  const pick=(rx)=>{const x=c.find(y=>rx.test(y.context));return x?x.value:""};
+  const mobile=pick(/\b(mobile|cell|cellular)\b|(?:^|[|•;\s])\(?\s*(?:m|c)\s*\)?\s*[:.-]?\s*$/i);
+  const fax=pick(/\bfax\b|(?:^|[|•;\s])\(?\s*f\s*\)?\s*[:.-]?\s*$/i);
+  const direct=pick(/\bdirect\b|(?:^|[|•;\s])\(?\s*d\s*\)?\s*[:.-]?\s*$/i);
+  const office=pick(/\b(office|business|phone|tel|telephone)\b|(?:^|[|•;\s])\(?\s*(?:o|p|t)\s*\)?\s*[:.-]?\s*$/i);
+  let business=direct||office;
+  if(!business){const u=c.find(y=>y.value!==mobile&&y.value!==fax);business=u?u.value:""}
+  return{businessPhone:phoneForOutlook(business),mobilePhone:phoneForOutlook(mobile),businessFax:phoneForOutlook(fax)}
+}
 function isJunkResourceUrl(v){return /(?:\.(?:png|jpe?g|gif|svg|webp|bmp|ico)(?:[?#]|$)|^cid:|^data:|\/image\/|\/images\/|\/logo[s]?\/|safelinks\.protection\.outlook\.com|google\.[^/]+\/maps|maps\.google\.|maps\.apple\.|bing\.com\/maps|goo\.gl\/maps)/i.test(v||"")}
 function website(sig,senderEmail){
   const re=/\b(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s|]*)?/i;
@@ -57,32 +67,111 @@ function inferPersonName(sig){
   }
   return "";
 }
-function company(sig,name){const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean),lowName=(name||"").toLowerCase();for(const line of lines){const low=" "+line.toLowerCase();if(line.length>2&&line.length<110&&COMPANY_WORDS.some(w=>low.includes(w)))return line}for(const line of lines.slice(0,12)){const low=line.toLowerCase();if(low===lowName||looksLikePersonName(line)||low.includes("@")||/\d{3}[\s.\-]\d{3}/.test(line)||/^https?:|^www\./i.test(line))continue;if(TITLE_WORDS.some(t=>low.includes(t)))continue;if(/^from:|^sent:|^to:|^subject:/i.test(line))continue;if(line.length>=3&&line.length<=80)return line}return""}
+function companyFromDomain(senderEmail,site){
+  let domain=cleanEmail(senderEmail).split("@")[1]||"";
+  if(!domain&&site){try{domain=new URL(/^https?:\/\//i.test(site)?site:"https://"+site).hostname}catch(_){domain=""}}
+  domain=domain.toLowerCase().replace(/^www\./,"");
+  if(!domain||/^(gmail|outlook|hotmail|live|icloud|me|aol|yahoo|protonmail|msn)\./i.test(domain))return"";
+  const stem=domain.split(".")[0].replace(/[-_]+/g," ").trim();
+  if(!stem)return"";
+  return stem.split(/\s+/).map(w=>/^\d+$/.test(w)?w:(w.charAt(0).toUpperCase()+w.slice(1))).join(" ");
+}
+function company(sig,name,senderEmail,site){
+  const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean),lowName=(name||"").toLowerCase();
+  for(const line of lines){
+    const low=" "+line.toLowerCase();
+    if(line.length>2&&line.length<110&&COMPANY_WORDS.some(w=>low.includes(w)))return line;
+  }
+  const domainCompany=companyFromDomain(senderEmail,site);
+  for(const line of lines.slice(0,12)){
+    const low=line.toLowerCase();
+    if(low===lowName||looksLikePersonName(line)||low.includes("@")||/\d{3}[\s.\-]\d{3}/.test(line)||/^https?:|^www\./i.test(line))continue;
+    if(TITLE_WORDS.some(t=>low.includes(t)))continue;
+    if(/^from:|^sent:|^to:|^subject:/i.test(line))continue;
+    if(/\b(?:p\.?o\.?\s*box|box|street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|suite|ste\.?|bldg|building)\b/i.test(line)||/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))continue;
+    if(/\d/.test(line))continue;
+    if(line.length>=3&&line.length<=80)return line;
+  }
+  return domainCompany;
+}
+const US_STATES=new Set(["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC"]);
+function usCountry(state){return US_STATES.has(String(state||"").toUpperCase())?"United States":""}
 function address(sig){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
-  const streetWord=/\b(street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|suite|ste\.?|floor|fl\.?|rell?a)\b/i;
+  const streetWord=/\b(street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|suite|ste\.?|floor|fl\.?|bldg|building|p\.?o\.?\s*box)\b/i;
+  const cityStateZip=/^([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/;
   for(let i=0;i<lines.length;i++){
     const line=lines[i];
+    const parts=line.split(/\s*[•|]\s*/).map(x=>x.trim()).filter(Boolean);
+    if(parts.length>=2){
+      const last=parts[parts.length-1].match(cityStateZip);
+      if(last){
+        const streetParts=parts.slice(0,-1).filter(x=>/\d/.test(x)||streetWord.test(x));
+        if(streetParts.length)return{street:streetParts.join("\n"),city:last[1].trim(),state:last[2],postalCode:last[3],countryOrRegion:usCountry(last[2])};
+      }
+    }
     let m=line.match(/^(.*\d.*?),\s*([A-Za-z .'-]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
-    if(m&&streetWord.test(m[1]))return{street:m[1].trim(),city:m[2].trim(),state:m[3],postalCode:m[4],countryOrRegion:"USA"};
+    if(m&&streetWord.test(m[1]))return{street:m[1].trim(),city:m[2].trim(),state:m[3],postalCode:m[4],countryOrRegion:usCountry(m[3])};
     m=line.match(/^(.*?)\s*[|•]\s*([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
-    if(m&&/\d/.test(m[1]))return{street:m[1].trim(),city:m[2].trim(),state:m[3],postalCode:m[4],countryOrRegion:"USA"};
-    if(/^\d{1,6}\s+/.test(line)&&streetWord.test(line)){
-      m=(lines[i+1]||"").match(/^([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
-      if(m)return{street:line,city:m[1].trim(),state:m[2],postalCode:m[3],countryOrRegion:"USA"}
+    if(m&&/\d/.test(m[1]))return{street:m[1].trim(),city:m[2].trim(),state:m[3],postalCode:m[4],countryOrRegion:usCountry(m[3])};
+    if((/^\d{1,6}\s+/.test(line)||/p\.?o\.?\s*box/i.test(line))&&streetWord.test(line)){
+      m=(lines[i+1]||"").match(cityStateZip);
+      if(m)return{street:line,city:m[1].trim(),state:m[2],postalCode:m[3],countryOrRegion:usCountry(m[2])};
     }
   }
   return{street:"",city:"",state:"",postalCode:"",countryOrRegion:""}
 }
 function signatureScore(line){let s=0;if(cleanEmail(line))s+=3;if(phoneTokens(line).length)s+=2;if(/\b(?:www\.|https?:\/\/)/i.test(line))s+=2;if(/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))s+=2;if(/^\d{1,6}\s+/.test(line))s+=1;const low=" "+line.toLowerCase();if(COMPANY_WORDS.some(w=>low.includes(w)))s+=2;if(TITLE_WORDS.some(w=>low.includes(w)))s+=1;if(looksLikePersonName(line))s+=1;return s}
-function isolateSignature(segmentText,senderEmail){let lines=norm(segmentText).split("\n").map(x=>x.trim()).filter(Boolean);const stop=lines.findIndex(l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l));if(stop>=0)lines=lines.slice(0,stop);if(lines.length>40)lines=lines.slice(-40);let lastSignal=-1;for(let i=0;i<lines.length;i++)if(signatureScore(lines[i])>0)lastSignal=i;if(lastSignal<0)return lines.slice(-14).join("\n");let start=Math.max(0,lastSignal-15),end=Math.min(lines.length,lastSignal+9);for(let i=Math.max(0,lastSignal-18);i<=lastSignal;i++){if(cleanEmail(lines[i])===senderEmail||signatureScore(lines[i])>=2||looksLikePersonName(lines[i])){start=Math.max(0,i-2);break}}return lines.slice(start,end).join("\n")}
+function isolateSignature(segmentText,senderEmail){
+  let lines=norm(segmentText).split("\n").map(x=>x.trim()).filter(Boolean);
+  const stop=lines.findIndex(l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l));
+  if(stop>=0)lines=lines.slice(0,stop);
+  const isHeader=l=>/^\s*(from|sent|to|cc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
+  // Never let a signature window cross into another quoted message header.
+  const email=(senderEmail||"").toLowerCase();
+  const anchors=[];
+  for(let i=0;i<lines.length;i++){
+    if(email&&cleanEmail(lines[i])===email)anchors.push(i);
+  }
+  // If the sender email appears in the signature, center the extraction on that occurrence.
+  if(anchors.length){
+    let best=null;
+    for(const a of anchors){
+      let lo=a,hi=a;
+      while(lo>0 && a-lo<10 && !isHeader(lines[lo-1]))lo--;
+      while(hi+1<lines.length && hi-a<8 && !isHeader(lines[hi+1]))hi++;
+      const chunk=lines.slice(lo,hi+1);
+      const score=chunk.reduce((t,l)=>t+signatureScore(l),0)+5;
+      if(!best||score>best.score)best={score,chunk};
+    }
+    if(best)return best.chunk.join("\n");
+  }
+  // Otherwise choose the highest-scoring compact block near the end of this sender's message.
+  if(lines.length>60)lines=lines.slice(-60);
+  let best={score:-1,chunk:[]};
+  for(let end=0;end<lines.length;end++){
+    if(isHeader(lines[end]))continue;
+    for(let len=4;len<=16;len++){
+      const start=Math.max(0,end-len+1),chunk=lines.slice(start,end+1);
+      if(chunk.some(isHeader))continue;
+      let score=chunk.reduce((t,l)=>t+signatureScore(l),0);
+      // Prefer blocks toward the bottom, where signatures normally live.
+      score += end/Math.max(1,lines.length);
+      // Penalize prose-heavy blocks.
+      score -= chunk.filter(l=>l.length>120).length*3;
+      if(score>best.score)best={score,chunk};
+    }
+  }
+  if(best.score>=2)return best.chunk.join("\n");
+  return lines.slice(-12).join("\n");
+}
 function parseContact(senderName,senderEmail,segmentText){
   const rawSig=isolateSignature(segmentText,senderEmail);
   const sig=cleanSignatureText(rawSig);
   const inferred=inferPersonName(sig);
   const senderLooksHuman=looksLikePersonName(senderName||"");
   const resolvedName=senderLooksHuman?senderName:(inferred||senderName||"");
-  return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName),jobTitle:title(sig),email:senderEmail||""},phones(sig),{businessHomePage:website(sig,senderEmail)},address(sig),{signature:sig,personalNotes:sig})
+  const site=website(sig,senderEmail);return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig),email:senderEmail||""},phones(sig),{businessHomePage:site},address(sig),{signature:sig,personalNotes:sig})
 }
 
 function sameEmail(a,b){return cleanEmail(a)&&cleanEmail(a)===cleanEmail(b)}
@@ -97,7 +186,18 @@ function cleanSignatureText(sig){
 function splitMessage(body,currentName,currentEmail){const text=norm(body);const lines=text.split("\n");const headers=[];for(let i=0;i<lines.length;i++){const m=lines[i].match(/^\s*From:\s*(.+)$/i);if(!m)continue;const val=m[1].trim();const email=cleanEmail(val);let name=cleanName(val.replace(email,""));if(!name&&email)name=email.split("@")[0];headers.push({i,name,email})}
   const firstHeader=headers.length?headers[0].i:lines.length;const out=[];out.push({name:currentName||"Current sender",email:(currentEmail||"").toLowerCase(),text:lines.slice(0,firstHeader).join("\n")});
   for(let h=0;h<headers.length;h++){const a=headers[h],b=headers[h+1]?headers[h+1].i:lines.length;out.push({name:a.name,email:a.email,text:lines.slice(a.i+1,b).join("\n")})}
-  const seen=new Set(),ded=[];for(const s of out){const key=s.email||s.name.toLowerCase();if(!key||seen.has(key))continue;seen.add(key);ded.push(s)}return ded}
+  // A person may appear more than once in a chain. Keep the segment that contains the
+  // strongest sender-specific signature rather than simply keeping the newest occurrence.
+  const bestByKey=new Map();
+  for(const seg of out){
+    const key=seg.email||seg.name.toLowerCase();if(!key)continue;
+    const sig=isolateSignature(seg.text,seg.email);
+    let score=norm(sig).split("\n").reduce((t,l)=>t+signatureScore(l),0);
+    if(seg.email && norm(sig).toLowerCase().includes(seg.email.toLowerCase()))score+=6;
+    const prev=bestByKey.get(key);
+    if(!prev||score>prev.score)bestByKey.set(key,{score,seg});
+  }
+  return [...bestByKey.values()].map(x=>x.seg)}
 
 function renderCandidates(){const box=$("candidates");box.innerHTML="";candidates.forEach((c,i)=>{const el=document.createElement("div");el.className="candidate";el.innerHTML=`<div class="candidate-head"><input type="checkbox" data-candidate="${i}" checked><div><div class="candidate-name">${html(c.name||"Unknown sender")}</div><div class="muted">${html(c.email||"No email found")}</div></div></div><div class="preview">${html(c.parsed.signature||"No signature block confidently found")}</div>`;box.appendChild(el)});$("candidateSection").hidden=false}
 function html(s){return String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]))}
