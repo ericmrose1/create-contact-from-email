@@ -2,7 +2,7 @@ import { createNestablePublicClientApplication, InteractionRequiredAuthError } f
 
 const GRAPH_SCOPES=["Contacts.ReadWrite"];
 const TITLE_WORDS=["project executive","senior project manager","project manager","assistant project manager","project engineer","project coordinator","construction manager","superintendent","estimator","vice president","president","principal","partner","director","manager","architect","engineer","designer","consultant","owner","coordinator"];
-const COMPANY_WORDS=[" llc"," l.l.c"," inc"," corp"," company"," co."," construction"," builders"," building"," architecture"," architects"," engineering"," engineers"," associates"," group"," studio"," mechanical"," electric"," electrical"," plumbing"," design"," contractors"," contractor"];
+const COMPANY_WORDS=[" llc"," l.l.c"," inc"," corp"," company"," co."," construction"," builders"," building"," architecture"," architects"," engineering"," engineers"," associates"," group"," studio"," mechanical"," electric"," electrical"," plumbing"," design"," contractors"," contractor"," garage"," workshop"," services"," solutions"," systems"," enterprises"," partners"];
 const CREDENTIALS=new Set(["AIA","PE","P.E.","RA","R.A.","LEED","PMP","NCARB","FAIA","SE","S.E."]);
 const FIELD_META={
   givenName:"First name",middleName:"Middle name",surname:"Last name",companyName:"Company",jobTitle:"Job title",email:"Email",
@@ -26,7 +26,7 @@ function phoneForOutlook(value){
 }
 function phoneTokens(sig){const re=/(?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]?)\d{3}[\s.\-]\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d+)?/gi,c=[];for(const line of norm(sig).split("\n")){const ms=[...line.matchAll(re)];for(let i=0;i<ms.length;i++){const m=ms[i],prev=i===0?0:ms[i-1].index+ms[i-1][0].length;c.push({context:line.slice(prev,m.index).trim(),value:m[0].trim()})}}return c}
 function phones(sig){const c=phoneTokens(sig);const pick=(rx)=>{const x=c.find(y=>rx.test(y.context));return x?x.value:""};const mobile=pick(/\b(mobile|cell|cellular)\b|(?:^|[|•;\s])(?:m|c)\s*[:.-]?\s*$/i);const fax=pick(/\bfax\b|(?:^|[|•;\s])f\s*[:.-]?\s*$/i);let business=pick(/\b(office|direct|business|phone|tel|telephone)\b|(?:^|[|•;\s])(?:o|d|p|t)\s*[:.-]?\s*$/i);if(!business){const u=c.find(y=>y.value!==mobile&&y.value!==fax);business=u?u.value:""}return{businessPhone:phoneForOutlook(business),mobilePhone:phoneForOutlook(mobile),businessFax:phoneForOutlook(fax)}}
-function isJunkResourceUrl(v){return /(?:\.(?:png|jpe?g|gif|svg|webp|bmp|ico)(?:[?#]|$)|^cid:|^data:|\/image\/|\/images\/|\/logo[s]?\/|safelinks\.protection\.outlook\.com)/i.test(v||"")}
+function isJunkResourceUrl(v){return /(?:\.(?:png|jpe?g|gif|svg|webp|bmp|ico)(?:[?#]|$)|^cid:|^data:|\/image\/|\/images\/|\/logo[s]?\/|safelinks\.protection\.outlook\.com|google\.[^/]+\/maps|maps\.google\.|maps\.apple\.|bing\.com\/maps|goo\.gl\/maps)/i.test(v||"")}
 function website(sig,senderEmail){
   const re=/\b(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s|]*)?/i;
   for(const line of norm(sig).split("\n")){
@@ -39,15 +39,50 @@ function website(sig,senderEmail){
   if(domain&&!personal.test(domain))return "https://"+domain.toLowerCase();
   return "";
 }
-function title(sig){for(const line of norm(sig).split("\n").map(x=>x.trim()).filter(Boolean)){const low=line.toLowerCase();if(line.length<=80&&TITLE_WORDS.some(t=>low.includes(t))&&!COMPANY_WORDS.some(w=>low.includes(w)))return line.replace(/^[-|•\s]+|[-|•\s]+$/g,"")}return""}
-function company(sig,name){const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean),lowName=(name||"").toLowerCase();for(const line of lines){const low=" "+line.toLowerCase();if(line.length>2&&line.length<100&&COMPANY_WORDS.some(w=>low.includes(w)))return line}for(const line of lines.slice(0,8)){const low=line.toLowerCase();if(low===lowName||low.includes("@")||/\d{3}[\s.\-]\d{3}/.test(line)||/^https?:|^www\./i.test(line))continue;if(TITLE_WORDS.some(t=>low.includes(t)))continue;if(/^from:|^sent:|^to:|^subject:/i.test(line))continue;if(line.length>=3&&line.length<=70)return line}return""}
-function address(sig){const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);const streetWord=/\b(street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|suite|ste\.?|floor|fl\.?)\b/i;for(let i=0;i<lines.length;i++){const line=lines[i];let m=line.match(/^(.*?)\s*[|•]\s*([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);if(m&&/\d/.test(m[1]))return{street:m[1].trim(),city:m[2].trim(),state:m[3],postalCode:m[4],countryOrRegion:"USA"};if(/^\d{1,6}\s+/.test(line)&&streetWord.test(line)){m=(lines[i+1]||"").match(/^([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);if(m)return{street:line,city:m[1].trim(),state:m[2],postalCode:m[3],countryOrRegion:"USA"}}}return{street:"",city:"",state:"",postalCode:"",countryOrRegion:""}}
-function signatureScore(line){let s=0;if(cleanEmail(line))s+=3;if(phoneTokens(line).length)s+=2;if(/\b(?:www\.|https?:\/\/)/i.test(line))s+=2;if(/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))s+=2;if(/^\d{1,6}\s+/.test(line))s+=1;const low=" "+line.toLowerCase();if(COMPANY_WORDS.some(w=>low.includes(w)))s+=2;if(TITLE_WORDS.some(w=>low.includes(w)))s+=1;return s}
-function isolateSignature(segmentText,senderEmail){let lines=norm(segmentText).split("\n").map(x=>x.trim()).filter(Boolean);const stop=lines.findIndex(l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l));if(stop>=0)lines=lines.slice(0,stop);if(lines.length>26)lines=lines.slice(-26);let lastSignal=-1;for(let i=0;i<lines.length;i++)if(signatureScore(lines[i])>0)lastSignal=i;if(lastSignal<0)return lines.slice(-10).join("\n");let start=Math.max(0,lastSignal-7),end=Math.min(lines.length,lastSignal+5);for(let i=Math.max(0,lastSignal-12);i<=lastSignal;i++){if(cleanEmail(lines[i])===senderEmail||signatureScore(lines[i])>=2){start=Math.max(0,i-3);break}}return lines.slice(start,end).join("\n")}
+function title(sig){for(const line of norm(sig).split("\n").map(x=>x.trim()).filter(Boolean)){const low=line.toLowerCase();if(line.length<=100&&TITLE_WORDS.some(t=>low.includes(t))&&!COMPANY_WORDS.some(w=>(" "+low).includes(w)))return line.replace(/^[-|•\s]+|[-|•\s]+$/g,"")}return""}
+function looksLikePersonName(line){
+  const v=(line||"").trim();if(!v||v.length<4||v.length>55)return false;
+  if(cleanEmail(v)||/\d|https?:|www\.|@|\b(?:street|st\.?|road|rd\.?|ave\.?|avenue|blvd\.?|boulevard|suite|ste\.?|drive|dr\.?|lane|ln\.?|city|inc\.?|llc|corp\.?|company|garage|workshop)\b/i.test(v))return false;
+  const low=v.toLowerCase();if(TITLE_WORDS.some(t=>low.includes(t))||COMPANY_WORDS.some(w=>(" "+low).includes(w)))return false;
+  const words=v.replace(/[,]/g," ").split(/\s+/).filter(Boolean);if(words.length<2||words.length>5)return false;
+  return words.every(w=>/^[A-Za-z][A-Za-z'.-]*$/.test(w));
+}
+function inferPersonName(sig){
+  const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
+  for(let i=0;i<Math.min(lines.length,12);i++){
+    if(looksLikePersonName(lines[i])){
+      const next=(lines[i+1]||"").toLowerCase();
+      if(!next||TITLE_WORDS.some(t=>next.includes(t))||COMPANY_WORDS.some(w=>(" "+next).includes(w)))return lines[i];
+    }
+  }
+  return "";
+}
+function company(sig,name){const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean),lowName=(name||"").toLowerCase();for(const line of lines){const low=" "+line.toLowerCase();if(line.length>2&&line.length<110&&COMPANY_WORDS.some(w=>low.includes(w)))return line}for(const line of lines.slice(0,12)){const low=line.toLowerCase();if(low===lowName||looksLikePersonName(line)||low.includes("@")||/\d{3}[\s.\-]\d{3}/.test(line)||/^https?:|^www\./i.test(line))continue;if(TITLE_WORDS.some(t=>low.includes(t)))continue;if(/^from:|^sent:|^to:|^subject:/i.test(line))continue;if(line.length>=3&&line.length<=80)return line}return""}
+function address(sig){
+  const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
+  const streetWord=/\b(street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|suite|ste\.?|floor|fl\.?|rell?a)\b/i;
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    let m=line.match(/^(.*\d.*?),\s*([A-Za-z .'-]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
+    if(m&&streetWord.test(m[1]))return{street:m[1].trim(),city:m[2].trim(),state:m[3],postalCode:m[4],countryOrRegion:"USA"};
+    m=line.match(/^(.*?)\s*[|•]\s*([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
+    if(m&&/\d/.test(m[1]))return{street:m[1].trim(),city:m[2].trim(),state:m[3],postalCode:m[4],countryOrRegion:"USA"};
+    if(/^\d{1,6}\s+/.test(line)&&streetWord.test(line)){
+      m=(lines[i+1]||"").match(/^([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
+      if(m)return{street:line,city:m[1].trim(),state:m[2],postalCode:m[3],countryOrRegion:"USA"}
+    }
+  }
+  return{street:"",city:"",state:"",postalCode:"",countryOrRegion:""}
+}
+function signatureScore(line){let s=0;if(cleanEmail(line))s+=3;if(phoneTokens(line).length)s+=2;if(/\b(?:www\.|https?:\/\/)/i.test(line))s+=2;if(/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))s+=2;if(/^\d{1,6}\s+/.test(line))s+=1;const low=" "+line.toLowerCase();if(COMPANY_WORDS.some(w=>low.includes(w)))s+=2;if(TITLE_WORDS.some(w=>low.includes(w)))s+=1;if(looksLikePersonName(line))s+=1;return s}
+function isolateSignature(segmentText,senderEmail){let lines=norm(segmentText).split("\n").map(x=>x.trim()).filter(Boolean);const stop=lines.findIndex(l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l));if(stop>=0)lines=lines.slice(0,stop);if(lines.length>40)lines=lines.slice(-40);let lastSignal=-1;for(let i=0;i<lines.length;i++)if(signatureScore(lines[i])>0)lastSignal=i;if(lastSignal<0)return lines.slice(-14).join("\n");let start=Math.max(0,lastSignal-15),end=Math.min(lines.length,lastSignal+9);for(let i=Math.max(0,lastSignal-18);i<=lastSignal;i++){if(cleanEmail(lines[i])===senderEmail||signatureScore(lines[i])>=2||looksLikePersonName(lines[i])){start=Math.max(0,i-2);break}}return lines.slice(start,end).join("\n")}
 function parseContact(senderName,senderEmail,segmentText){
   const rawSig=isolateSignature(segmentText,senderEmail);
   const sig=cleanSignatureText(rawSig);
-  return Object.assign({},nameParts(senderName),{companyName:company(sig,senderName),jobTitle:title(sig),email:senderEmail||""},phones(sig),{businessHomePage:website(sig,senderEmail)},address(sig),{signature:sig,personalNotes:sig})
+  const inferred=inferPersonName(sig);
+  const senderLooksHuman=looksLikePersonName(senderName||"");
+  const resolvedName=senderLooksHuman?senderName:(inferred||senderName||"");
+  return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName),jobTitle:title(sig),email:senderEmail||""},phones(sig),{businessHomePage:website(sig,senderEmail)},address(sig),{signature:sig,personalNotes:sig})
 }
 
 function sameEmail(a,b){return cleanEmail(a)&&cleanEmail(a)===cleanEmail(b)}
@@ -55,6 +90,7 @@ function cleanSignatureText(sig){
   return norm(sig).split("\n").map(x=>x.trim()).filter(Boolean).filter(line=>{
     if(/^(?:https?:\/\/)?[^\s]+\.(?:png|jpe?g|gif|svg|webp|bmp|ico)(?:[?#].*)?$/i.test(line))return false;
     if(/^cid:|^data:image/i.test(line))return false;
+    if(/(?:google\.[^/]+\/maps|maps\.google\.|maps\.apple\.|bing\.com\/maps|goo\.gl\/maps|safelinks\.protection\.outlook\.com)/i.test(line))return false;
     return true;
   }).join("\n")
 }
@@ -69,13 +105,25 @@ function htmlBodyToText(htmlText){
   try{
     const doc=new DOMParser().parseFromString(htmlText||"","text/html");
     doc.querySelectorAll("script,style,noscript").forEach(n=>n.remove());
+    doc.querySelectorAll("a").forEach(a=>{
+      const href=(a.getAttribute("href")||"").trim();
+      let visible=(a.textContent||"").replace(/\s+/g," ").trim();
+      if(!visible){
+        if(/^mailto:/i.test(href)) visible=decodeURIComponent(href.replace(/^mailto:/i,"").split("?")[0]);
+        else if(/^tel:/i.test(href)) visible=decodeURIComponent(href.replace(/^tel:/i,"").split("?")[0]);
+        else if(/^https?:/i.test(href)&&!isJunkResourceUrl(href)) visible=href;
+      }
+      if(isJunkResourceUrl(visible))visible="";
+      a.replaceWith(doc.createTextNode(visible?` ${visible} `:" "));
+    });
     doc.querySelectorAll("img").forEach(img=>{
       const alt=(img.getAttribute("alt")||img.getAttribute("title")||"").trim();
-      img.replaceWith(doc.createTextNode(alt?` ${alt} `:" "));
+      const safeAlt=isJunkResourceUrl(alt)?"":alt;
+      img.replaceWith(doc.createTextNode(safeAlt?` ${safeAlt} `:" "));
     });
     doc.querySelectorAll("br").forEach(br=>br.replaceWith(doc.createTextNode("\n")));
-    doc.querySelectorAll("p,div,li,tr,table,blockquote").forEach(el=>{el.appendChild(doc.createTextNode("\n"))});
-    return norm(doc.body.textContent||"").replace(/\n{3,}/g,"\n\n");
+    doc.querySelectorAll("p,div,li,tr,table,blockquote,td").forEach(el=>{el.appendChild(doc.createTextNode("\n"))});
+    return norm(doc.body.textContent||"").replace(/[\u200B-\u200D\uFEFF]/g,"").replace(/\n[ \t]+/g,"\n").replace(/\n{3,}/g,"\n\n");
   }catch(_){return ""}
 }
 function readBody(item){
