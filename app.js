@@ -127,27 +127,32 @@ function companyFromDomain(senderEmail,site){
 }
 function company(sig,name,senderEmail,site){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean),lowName=(name||"").toLowerCase();
+  // First trust explicit company-like text in the signature.
   for(const line of lines){
     const low=" "+line.toLowerCase();
     if(line.length>2&&line.length<110&&COMPANY_WORDS.some(w=>low.includes(w)))return line;
   }
+  // If the company is in a logo and not exposed as text, the business domain is safer
+  // than guessing from ordinary email prose.
   const domainCompany=companyFromDomain(senderEmail,site);
-  for(const line of lines.slice(0,12)){
+  if(domainCompany)return domainCompany;
+  // Last-resort generic text fallback, deliberately conservative.
+  for(const line of lines.slice(0,10)){
     const low=line.toLowerCase();
     if(low===lowName||looksLikePersonName(line)||low.includes("@")||/\d{3}[\s.\-]\d{3}/.test(line)||/^https?:|^www\./i.test(line))continue;
     if(TITLE_WORDS.some(t=>low.includes(t)))continue;
-    if(/^from:|^sent:|^to:|^subject:/i.test(line))continue;
-    if(/\b(?:p\.?o\.?\s*box|box|street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|suite|ste\.?|bldg|building)\b/i.test(line)||/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))continue;
-    if(/\d/.test(line))continue;
-    if(line.length>=3&&line.length<=80)return line;
+    if(/^from:|^sent:|^to:|^cc:|^subject:/i.test(line))continue;
+    if(/\b(?:p\.?o\.?\s*box|box|street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|loop|suite|ste\.?|bldg|building)\b/i.test(line)||/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))continue;
+    if(/\d/.test(line)||/[.!?]\s*$/.test(line)||line.split(/\s+/).length>7)continue;
+    if(line.length>=3&&line.length<=60)return line;
   }
-  return domainCompany;
+  return "";
 }
 const US_STATES=new Set(["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC"]);
 function usCountry(state){return US_STATES.has(String(state||"").toUpperCase())?"United States":""}
 function address(sig){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
-  const streetWord=/\b(street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|loop|terrace|ter\.?|court|ct\.?|suite|ste\.?|floor|fl\.?|bldg|building|p\.?o\.?\s*box)\b/i;
+  const streetWord=/\b(street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|loop|terrace|ter\.?|suite|ste\.?|floor|fl\.?|bldg|building|p\.?o\.?\s*box)\b/i;
   const cityStateZip=/^([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/;
   for(let i=0;i<lines.length;i++){
     const line=lines[i];
@@ -156,63 +161,78 @@ function address(sig){
       const last=parts[parts.length-1].match(cityStateZip);
       if(last){
         const streetParts=parts.slice(0,-1).filter(x=>/\d/.test(x)||streetWord.test(x));
-        if(streetParts.length)return{street:streetParts.join("\n"),city:last[1].trim(),state:last[2],postalCode:last[3],countryOrRegion:usCountry(last[2])};
+        return{street:streetParts.join("\n"),city:last[1].trim(),state:last[2],postalCode:last[3],countryOrRegion:usCountry(last[2])};
       }
     }
     let m=line.match(/^(.*\d.*?),\s*([A-Za-z .'-]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
     if(m&&streetWord.test(m[1]))return{street:m[1].trim(),city:m[2].trim(),state:m[3],postalCode:m[4],countryOrRegion:usCountry(m[3])};
     m=line.match(/^(.*?)\s*[|•]\s*([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
     if(m&&/\d/.test(m[1]))return{street:m[1].trim(),city:m[2].trim(),state:m[3],postalCode:m[4],countryOrRegion:usCountry(m[3])};
-    if((/^\d{1,6}\s+/.test(line)||/p\.?o\.?\s*box/i.test(line))&&streetWord.test(line)){
-      m=(lines[i+1]||"").match(cityStateZip);
-      if(m)return{street:line,city:m[1].trim(),state:m[2],postalCode:m[3],countryOrRegion:usCountry(m[2])};
+    m=line.match(cityStateZip);
+    if(m){
+      let street="";
+      for(let j=i-1;j>=Math.max(0,i-3);j--){
+        const prev=lines[j];
+        if(/^from:|^sent:|^to:|^cc:|^subject:/i.test(prev))break;
+        if((/^\d{1,6}\s+/.test(prev)||/p\.?o\.?\s*box/i.test(prev))&&(streetWord.test(prev)||/\d/.test(prev))){street=prev+(street?"\n"+street:"");}
+        else if(street)break;
+      }
+      return{street,city:m[1].trim(),state:m[2],postalCode:m[3],countryOrRegion:usCountry(m[2])};
     }
   }
   return{street:"",city:"",state:"",postalCode:"",countryOrRegion:""}
 }
 function signatureScore(line){let s=0;if(cleanEmail(line))s+=3;if(phoneTokens(line).length)s+=2;if(/\b(?:www\.|https?:\/\/)/i.test(line))s+=2;if(/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))s+=2;if(/^\d{1,6}\s+/.test(line))s+=1;const low=" "+line.toLowerCase();if(COMPANY_WORDS.some(w=>low.includes(w)))s+=2;if(TITLE_WORDS.some(w=>low.includes(w)))s+=1;if(looksLikePersonName(line))s+=1;return s}
 function isolateSignature(segmentText,senderEmail){
-  let lines=norm(segmentText).split("\n").map(x=>x.trim()).filter(Boolean);
-  const stop=lines.findIndex(l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l));
-  if(stop>=0)lines=lines.slice(0,stop);
+  const rawLines=norm(segmentText).split("\n").map(x=>x.trim());
   const isHeader=l=>/^\s*(from|sent|to|cc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  // Never let a signature window cross into another quoted message header.
+  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
   const email=(senderEmail||"").toLowerCase();
   const anchors=[];
-  for(let i=0;i<lines.length;i++){
-    if(email&&cleanEmail(lines[i])===email)anchors.push(i);
+  for(let i=0;i<rawLines.length;i++){
+    if(email&&cleanEmail(rawLines[i])===email&&!isHeader(rawLines[i]))anchors.push(i);
   }
-  // If the sender email appears in the signature, center the extraction on that occurrence.
+  // Strongest rule: a sender's own email inside the message body almost always sits in the signature.
+  // Build a compact block around it and stop at blank lines / quoted-message headers so email prose
+  // cannot leak into Notes or contact fields.
   if(anchors.length){
     let best=null;
     for(const a of anchors){
       let lo=a,hi=a;
-      while(lo>0 && a-lo<10 && !isHeader(lines[lo-1]))lo--;
-      while(hi+1<lines.length && hi-a<8 && !isHeader(lines[hi+1]))hi++;
-      const chunk=lines.slice(lo,hi+1);
-      const score=chunk.reduce((t,l)=>t+signatureScore(l),0)+5;
+      while(lo>0 && a-lo<8){
+        const p=rawLines[lo-1];
+        if(!p||isHeader(p)||isDisclaimer(p))break;
+        lo--;
+      }
+      while(hi+1<rawLines.length && hi-a<5){
+        const n=rawLines[hi+1];
+        if(!n||isHeader(n)||isDisclaimer(n))break;
+        hi++;
+      }
+      let chunk=rawLines.slice(lo,hi+1).filter(Boolean);
+      // If there was no blank line, trim leading prose until the block becomes signature-like.
+      while(chunk.length>5 && signatureScore(chunk[0])===0 && signatureScore(chunk[1])===0)chunk.shift();
+      const score=chunk.reduce((t,l)=>t+signatureScore(l),0)+8;
       if(!best||score>best.score)best={score,chunk};
     }
-    if(best)return best.chunk.join("\n");
+    if(best&&best.chunk.length)return best.chunk.join("\n");
   }
-  // Otherwise choose the highest-scoring compact block near the end of this sender's message.
+  // No sender-email anchor: score compact blocks, but heavily penalize prose.
+  let lines=rawLines.filter((l,i)=>l && !isDisclaimer(l));
   if(lines.length>60)lines=lines.slice(-60);
-  let best={score:-1,chunk:[]};
+  let best={score:-999,chunk:[]};
   for(let end=0;end<lines.length;end++){
     if(isHeader(lines[end]))continue;
-    for(let len=4;len<=16;len++){
+    for(let len=3;len<=12;len++){
       const start=Math.max(0,end-len+1),chunk=lines.slice(start,end+1);
       if(chunk.some(isHeader))continue;
-      let score=chunk.reduce((t,l)=>t+signatureScore(l),0);
-      // Prefer blocks toward the bottom, where signatures normally live.
-      score += end/Math.max(1,lines.length);
-      // Penalize prose-heavy blocks.
-      score -= chunk.filter(l=>l.length>120).length*3;
+      let score=chunk.reduce((t,l)=>t+signatureScore(l),0)+end/Math.max(1,lines.length);
+      score-=chunk.filter(l=>l.length>90||(/[.!?]$/.test(l)&&l.split(/\s+/).length>10)).length*5;
       if(score>best.score)best={score,chunk};
     }
   }
-  if(best.score>=2)return best.chunk.join("\n");
-  return lines.slice(-12).join("\n");
+  if(best.score>=3)return best.chunk.join("\n");
+  return "";
 }
 function parseContact(senderName,senderEmail,segmentText){
   const rawSig=isolateSignature(segmentText,senderEmail);
