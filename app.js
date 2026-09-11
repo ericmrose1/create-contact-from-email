@@ -192,7 +192,20 @@ function address(sig){
     }
   }
 
-  if(!location)return{street:"",city:"",state:"",postalCode:"",countryOrRegion:""};
+  if(!location){
+    // Very loose fallback: find a US state+ZIP anywhere, then derive city and street independently.
+    const flat=raw.replace(/[\n•|]+/g," ").replace(/\s+/g," ").trim();
+    const sz=[...flat.matchAll(/\b([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\b/g)].find(m=>US_STATES.has(m[1]));
+    if(sz){
+      const state=sz[1],postalCode=sz[2],before=flat.slice(0,sz.index).replace(/[,;\s]+$/g,"");
+      const streetMatch=before.match(/(\d{1,6}\s+[A-Za-z0-9 .,'#&\/-]+?\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|loop|terrace|ter\.?)(?:\s+(?:suite|ste\.?|bldg|building|floor|fl\.?)\s*[A-Za-z0-9-]+)?)/ig);
+      let street="",city="";
+      if(streetMatch&&streetMatch.length){street=streetMatch[streetMatch.length-1].trim();const pos=before.toLowerCase().lastIndexOf(street.toLowerCase());city=before.slice(pos+street.length).replace(/^[,;\s]+|[,;\s]+$/g,"").trim();}
+      if(!city){const cm=before.match(/([A-Za-z][A-Za-z .'-]{1,40})$/);if(cm)city=cm[1].trim();}
+      return{street,city,state,postalCode,countryOrRegion:"United States"};
+    }
+    return{street:"",city:"",state:"",postalCode:"",countryOrRegion:""};
+  }
 
   let street="";
   const locLineIndex=lines.findIndex(l=>l===location.line);
@@ -512,6 +525,42 @@ function htmlSignatureCandidates(html,currentName,currentEmail,myEmail){
   }catch(_){ }
   return [...out.values()].map(x=>({name:x.name,email:x.email,text:x.text,parsed:x.parsed}));
 }
+function parsedCompleteness(p){
+  if(!p)return 0;
+  let score=0;
+  for(const k of ["street","city","state","postalCode","countryOrRegion","businessPhone","mobilePhone","companyName","businessHomePage","jobTitle"])if(String(p[k]||"").trim())score+=1;
+  const sigLines=norm(p.signature||"").split("\n").map(x=>x.trim()).filter(Boolean).length;
+  score+=Math.min(sigLines,10)/10;
+  return score;
+}
+function mergeParsed(primary,secondary,sourceLabel){
+  const a={...(primary||{})},b=secondary||{};
+  const fill=["givenName","middleName","surname","companyName","jobTitle","email","businessPhone","mobilePhone","businessFax","businessHomePage","street","city","state","postalCode","countryOrRegion"];
+  for(const k of fill)if(!String(a[k]||"").trim()&&String(b[k]||"").trim())a[k]=b[k];
+  // Country must be inferred independently whenever either parser found a valid U.S. state.
+  if(!a.countryOrRegion){const st=(a.state||b.state||"").toUpperCase();if(US_STATES.has(st))a.countryOrRegion="United States"}
+  // Prefer the more complete visible signature for Notes. This prevents a small HTML cell
+  // containing only the email address from replacing a richer text signature.
+  const aSig=cleanSignatureText(a.signature||""),bSig=cleanSignatureText(b.signature||"");
+  const aLines=aSig.split("\n").filter(Boolean).length,bLines=bSig.split("\n").filter(Boolean).length;
+  const aScore=parsedCompleteness({...a,signature:aSig}),bScore=parsedCompleteness({...b,signature:bSig});
+  if(bSig && (bLines>aLines || bScore>aScore+0.5))a.signature=bSig; else a.signature=aSig;
+  a.personalNotes=a.signature||"";
+  a._debug={source:sourceLabel||"merged",htmlSignature:primary?.signature||"",textSignature:secondary?.signature||"",htmlScore:aScore,textScore:bScore};
+  return a;
+}
+function diagnosticRows(parsed){
+  const vals=[
+    ["Company",parsed.companyName],["Business / direct",parsed.businessPhone],["Mobile",parsed.mobilePhone],
+    ["Street",parsed.street],["City",parsed.city],["State",parsed.state],["ZIP",parsed.postalCode],["Country inferred",parsed.countryOrRegion]
+  ];
+  return vals.map(([l,v])=>`<div class="diag-row"><b>${html(l)}</b><span>${html(v||"(not detected)")}</span></div>`).join("");
+}
+function diagnosticPanel(parsed){
+  const d=parsed._debug||{};
+  return `<details class="diagnostic" open><summary>Parser diagnostic — what the add-in actually detected</summary><div class="diag-source">Source used: ${html(d.source||"email signature")}</div>${diagnosticRows(parsed)}<div class="diag-block"><b>Signature text used for Notes</b><pre>${html(parsed.signature||"(none)")}</pre></div>${d.htmlSignature&&d.textSignature&&d.htmlSignature!==d.textSignature?`<div class="diag-block"><b>HTML signature candidate</b><pre>${html(d.htmlSignature)}</pre><b>Plain-text signature candidate</b><pre>${html(d.textSignature)}</pre></div>`:""}</details>`;
+}
+
 function readBody(item){
   return new Promise((resolve,reject)=>{
     item.body.getAsync(Office.CoercionType.Html,r=>{
@@ -531,10 +580,21 @@ async function scan(){try{
   const myEmail=(Office.context.mailbox.userProfile?.emailAddress||"").toLowerCase();
   const htmlCandidates=body.html?htmlSignatureCandidates(body.html,from.displayName||"",from.emailAddress||"",myEmail):[];
   const textCandidates=anchoredSignatureCandidates(body.text,from.displayName||"",from.emailAddress||"",myEmail);
-  // HTML candidates win because they preserve table structure. Add text-only candidates only when HTML did not find that email.
+  // Compare the HTML and plain-text readings for the same person instead of blindly
+  // letting HTML win. Outlook often puts the mailto link in a small nested table cell while
+  // the plain-text rendering contains the complete visible address and phones.
   const merged=new Map();
-  for(const c of htmlCandidates)merged.set(c.email.toLowerCase(),c);
-  for(const c of textCandidates)if(!merged.has((c.email||"").toLowerCase()))merged.set((c.email||c.name).toLowerCase(),c);
+  const htmlMap=new Map(htmlCandidates.map(c=>[(c.email||"").toLowerCase(),c]));
+  const textMap=new Map(textCandidates.map(c=>[(c.email||"").toLowerCase(),c]));
+  const keys=new Set([...htmlMap.keys(),...textMap.keys()]);
+  for(const key of keys){
+    const h=htmlMap.get(key),t=textMap.get(key);
+    if(h&&t){
+      const parsed=mergeParsed(h.parsed,t.parsed,"HTML + plain-text merged");
+      merged.set(key,{...h,parsed,text:parsed.signature});
+    }else if(h){h.parsed._debug={source:"HTML only",htmlSignature:h.parsed.signature||"",textSignature:""};merged.set(key,h)}
+    else if(t){t.parsed._debug={source:"Plain text only",htmlSignature:"",textSignature:t.parsed.signature||""};merged.set(key,t)}
+  }
   candidates=[...merged.values()];
   renderCandidates();
   status(`Found ${candidates.length} possible contact${candidates.length===1?"":"s"}. Your own messages/signature are ignored. Select the people you want to process.`,"ok")
@@ -545,21 +605,47 @@ function showAuthSetup(){const id=clientId();$("authSetup").hidden=!!id;$("clien
 async function initMsal(){const id=clientId();if(!id)throw new Error("Microsoft Contacts access is not configured yet. Enter the Application (client) ID first.");if(!msalInstance){msalInstance=await createNestablePublicClientApplication({auth:{clientId:id,authority:"https://login.microsoftonline.com/common"},cache:{cacheLocation:"localStorage"}})}return msalInstance}
 async function accessToken(){const pca=await initMsal();const request={scopes:GRAPH_SCOPES,loginHint:Office.context.mailbox.userProfile.emailAddress};try{return (await pca.acquireTokenSilent(request)).accessToken}catch(err){if(err instanceof InteractionRequiredAuthError || /interaction|consent|login/i.test(String(err?.errorCode||err?.message||err))){return (await pca.acquireTokenPopup(request)).accessToken}throw err}}
 async function graph(path,opts={}){const token=await accessToken();const r=await fetch("https://graph.microsoft.com/v1.0"+path,{...opts,headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json",...(opts.headers||{})}});if(!r.ok){const t=await r.text();throw new Error(`Microsoft Contacts error ${r.status}: ${t.slice(0,350)}`)}if(r.status===204)return null;return r.json()}
-async function loadContacts(){let url="/me/contacts?$top=250&$select=id,displayName,givenName,middleName,surname,companyName,jobTitle,emailAddresses,businessPhones,mobilePhone,businessHomePage,businessAddress,personalNotes";const all=[];while(url){const data=await graph(url.replace("https://graph.microsoft.com/v1.0",""));all.push(...(data.value||[]));url=data["@odata.nextLink"]||""}return all}
+async function loadContacts(){let url="/me/contacts?$top=250&$select=id,displayName,givenName,middleName,surname,companyName,jobTitle,emailAddresses,businessPhones,mobilePhone,businessHomePage,businessAddress,homeAddress,otherAddress,personalNotes";const all=[];while(url){const data=await graph(url.replace("https://graph.microsoft.com/v1.0",""));all.push(...(data.value||[]));url=data["@odata.nextLink"]||""}return all}
 function n(s){return String(s||"").trim().toLowerCase().replace(/[^a-z0-9]+/g," ").trim()}
 function digits(s){return String(s||"").replace(/\D/g,"").slice(-10)}
-function existingFlat(c){const a=c.businessAddress||{};return{givenName:c.givenName||"",middleName:c.middleName||"",surname:c.surname||"",companyName:c.companyName||"",jobTitle:c.jobTitle||"",email:(c.emailAddresses?.[0]?.address)||"",businessPhone:(c.businessPhones?.[0])||"",mobilePhone:c.mobilePhone||"",businessFax:"",businessHomePage:c.businessHomePage||"",street:a.street||"",city:a.city||"",state:a.state||"",postalCode:a.postalCode||"",countryOrRegion:a.countryOrRegion||"",personalNotes:c.personalNotes||""}}
+function addressHasData(a){return !!(a&&(a.street||a.city||a.state||a.postalCode||a.countryOrRegion))}
+function preferredExistingAddress(c){
+  if(addressHasData(c.businessAddress))return {a:c.businessAddress,type:"Business"};
+  if(addressHasData(c.homeAddress))return {a:c.homeAddress,type:"Home"};
+  if(addressHasData(c.otherAddress))return {a:c.otherAddress,type:"Other"};
+  return {a:{},type:""};
+}
+function existingFlat(c){const pref=preferredExistingAddress(c),a=pref.a||{};return{givenName:c.givenName||"",middleName:c.middleName||"",surname:c.surname||"",companyName:c.companyName||"",jobTitle:c.jobTitle||"",email:(c.emailAddresses?.[0]?.address)||"",businessPhone:(c.businessPhones?.[0])||"",mobilePhone:c.mobilePhone||"",businessFax:"",businessHomePage:c.businessHomePage||"",street:a.street||"",city:a.city||"",state:a.state||"",postalCode:a.postalCode||"",countryOrRegion:a.countryOrRegion||"",personalNotes:c.personalNotes||"",_addressType:pref.type,_allBusinessPhones:(c.businessPhones||[]).join(" | ")}}
 function matchContact(p){const email=n(p.email);if(email){const m=graphContacts.find(c=>(c.emailAddresses||[]).some(e=>n(e.address)===email));if(m)return{contact:m,confidence:"Exact email"}}
   const full=n([p.givenName,p.middleName,p.surname].filter(Boolean).join(" "));const companyN=n(p.companyName);const ph=[digits(p.businessPhone),digits(p.mobilePhone)].filter(Boolean);
   const candidates2=graphContacts.filter(c=>{const f=n([c.givenName,c.middleName,c.surname].filter(Boolean).join(" "));if(!full||f!==full)return false;const cf=n(c.companyName);if(companyN&&cf&&companyN===cf)return true;const cp=[...(c.businessPhones||[]),c.mobilePhone||""].map(digits).filter(Boolean);return ph.some(x=>cp.includes(x))});
   return candidates2.length===1?{contact:candidates2[0],confidence:"Name + company/phone"}:null}
 function fieldDiffs(parsed,existing){const out=[];for(const [key,label] of Object.entries(FIELD_META)){const nv=(parsed[key]||"").trim(),ov=(existing[key]||"").trim();if(!nv)continue;if(n(nv)===n(ov))continue;out.push({key,label,old:ov,new:nv,defaultChecked:!ov})}return out}
-function graphPayload(p,keys=null){const use=k=>!keys||keys.has(k);const o={};if(use("givenName"))o.givenName=p.givenName||"";if(use("middleName"))o.middleName=p.middleName||"";if(use("surname"))o.surname=p.surname||"";if(use("companyName"))o.companyName=p.companyName||"";if(use("jobTitle"))o.jobTitle=p.jobTitle||"";if(use("email")&&p.email)o.emailAddresses=[{address:p.email,name:[p.givenName,p.surname].filter(Boolean).join(" ")||p.email}];if(use("businessPhone")&&p.businessPhone)o.businessPhones=[phoneForOutlook(p.businessPhone)];if(use("mobilePhone"))o.mobilePhone=phoneForOutlook(p.mobilePhone||"");if(use("businessHomePage"))o.businessHomePage=p.businessHomePage||"";if(use("personalNotes"))o.personalNotes=p.personalNotes||"";const addressKeys=["street","city","state","postalCode","countryOrRegion"].filter(use);if(addressKeys.length)o.businessAddress={street:p.street||"",city:p.city||"",state:p.state||"",postalCode:p.postalCode||"",countryOrRegion:p.countryOrRegion||""};return o}
-function editableFields(p,idx){return `<div class="grid">${Object.entries(FIELD_META).map(([k,l])=>k==="personalNotes"?`<div class="field full notes-field"><div class="notes-label-row"><label>${html(l)} <span class="muted">— editable before saving</span></label><div class="notes-actions"><button type="button" class="mini-btn" data-notes-action="clear" data-index="${idx}">Clear Notes</button><button type="button" class="mini-btn" data-notes-action="restore" data-index="${idx}">Restore Signature</button></div></div><textarea data-review="${idx}" data-field="${k}" spellcheck="true" aria-label="Editable Notes">${html(p[k]||"")}</textarea><div class="muted notes-help">Delete, shorten, or rewrite this text. Outlook will receive exactly what remains in this box.</div></div>`:`<div class="field ${["email","street"].includes(k)?"full":""}"><label>${html(l)}</label><input data-review="${idx}" data-field="${k}" value="${html(p[k]||"")}"></div>`).join("")}</div>`}
-function renderReviews(items){const box=$("reviews");box.innerHTML="";items.forEach((it,idx)=>{const p=it.parsed,m=it.match,existing=m?existingFlat(m.contact):null,diffs=existing?fieldDiffs(p,existing):[];const el=document.createElement("div");el.className="review";el.dataset.reviewCard=idx;const badge=m?`<span class="badge existing">Existing contact — ${html(m.confidence)}</span>`:`<span class="badge">New contact</span>`;el.innerHTML=`${badge}<div class="candidate-name" style="margin-top:6px">${html([p.givenName,p.middleName,p.surname].filter(Boolean).join(" ")||it.name)}</div><div class="muted">${html(p.email||it.email||"")}</div><div class="signature-sticky"><div class="sig-title">Signature block from email</div><pre>${html(p.signature||"No signature block confidently found")}</pre></div>${editableFields(p,idx)}${m?`<div class="diffs"><b>New or different information</b>${diffs.length?diffs.map(d=>`<label class="diff"><input type="checkbox" data-diff="${idx}" data-key="${d.key}" ${d.defaultChecked?"checked":""}><span>${html(d.label)}</span><span class="vals"><span class="old">Existing: ${html(d.old||"(blank)")}</span><br><span class="new">From email: ${html(d.new)}</span></span></label>`).join(""):"<div class=\"muted\">No new information was found.</div>"}</div><div class="toolbar"><button class="btn primary" data-action="update" data-index="${idx}" ${diffs.length?"":"disabled"}>Update Existing Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`:`<div class="toolbar"><button class="btn primary" data-action="create" data-index="${idx}">Create Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`}`;box.appendChild(el)});$("reviewSection").hidden=false;box.querySelectorAll("button[data-action]").forEach(b=>b.addEventListener("click",handleAction));box.querySelectorAll("button[data-notes-action]").forEach(b=>b.addEventListener("click",e=>{const idx=Number(e.currentTarget.dataset.index);const ta=document.querySelector(`textarea[data-review="${idx}"][data-field="personalNotes"]`);if(!ta)return;if(e.currentTarget.dataset.notesAction==="clear")ta.value="";else ta.value=(window.__reviewItems[idx]?.parsed?.signature||"");ta.focus();}));}
+function graphPayload(p,keys=null,existing=null){const use=k=>!keys||keys.has(k);const o={};if(use("givenName"))o.givenName=p.givenName||"";if(use("middleName"))o.middleName=p.middleName||"";if(use("surname"))o.surname=p.surname||"";if(use("companyName"))o.companyName=p.companyName||"";if(use("jobTitle"))o.jobTitle=p.jobTitle||"";if(use("email")&&p.email)o.emailAddresses=[{address:p.email,name:[p.givenName,p.surname].filter(Boolean).join(" ")||p.email}];if(use("businessPhone")&&p.businessPhone)o.businessPhones=[phoneForOutlook(p.businessPhone)];if(use("mobilePhone")&&p.mobilePhone)o.mobilePhone=phoneForOutlook(p.mobilePhone);if(use("businessHomePage")&&p.businessHomePage)o.businessHomePage=p.businessHomePage;if(use("personalNotes"))o.personalNotes=p.personalNotes||"";
+  const addrNames=["street","city","state","postalCode","countryOrRegion"];
+  const addressKeys=addrNames.filter(use);
+  if(addressKeys.length){const base=existing||{};o.businessAddress={};for(const k of addrNames)o.businessAddress[k]=(use(k)&&p[k])?p[k]:(base[k]||"");}
+  return o}
+function editableFields(p,idx,existing=null){
+  return `<div class="grid">${Object.entries(FIELD_META).map(([k,l])=>{
+    const initial=(p[k]||(!p[k]&&existing?existing[k]:"")||"");
+    if(k==="personalNotes")return `<div class="field full notes-field"><div class="notes-label-row"><label>${html(l)} <span class="muted">— editable before saving</span></label><div class="notes-actions"><button type="button" class="mini-btn" data-notes-action="clear" data-index="${idx}">Clear Notes</button><button type="button" class="mini-btn" data-notes-action="restore" data-index="${idx}">Restore Signature</button></div></div><textarea data-review="${idx}" data-field="${k}" spellcheck="true" aria-label="Editable Notes">${html(initial)}</textarea><div class="muted notes-help">Delete, shorten, or rewrite this text. Outlook will receive exactly what remains in this box.</div></div>`;
+    return `<div class="field ${["email","street"].includes(k)?"full":""}"><label>${html(l)}</label><input data-review="${idx}" data-field="${k}" value="${html(initial)}"></div>`
+  }).join("")}</div>`
+}
+function comparisonRows(parsed,existing){
+  return Object.entries(FIELD_META).map(([key,label])=>{
+    const nv=(parsed[key]||"").trim(),ov=(existing[key]||"").trim();
+    const same=nv&&ov&&n(nv)===n(ov);
+    const state=!nv?"No value found in email":same?"Same":"Different / new";
+    const cls=!nv?"missing":same?"same":"changed";
+    return `<div class="compare-row ${cls}"><div class="compare-label">${html(label)}</div><div><span class="compare-head">Existing Outlook</span><div>${html(ov||"(blank)")}</div></div><div><span class="compare-head">From email</span><div>${html(nv||"(not found)")}</div></div><div class="compare-state">${html(state)}</div></div>`
+  }).join("")
+}
+function renderReviews(items){const box=$("reviews");box.innerHTML="";items.forEach((it,idx)=>{const p=it.parsed,m=it.match,existing=m?existingFlat(m.contact):null,diffs=existing?fieldDiffs(p,existing):[];const el=document.createElement("div");el.className="review";el.dataset.reviewCard=idx;const badge=m?`<span class="badge existing">Existing contact — ${html(m.confidence)}</span>`:`<span class="badge">New contact</span>`;const existingSummary=m?`<div class="existing-panel"><b>Existing Outlook contact data</b>${existing._addressType?`<div class="muted">Address currently stored by Outlook as ${html(existing._addressType)} Address.</div>`:""}<div class="compare-table">${comparisonRows(p,existing)}</div></div>`:"";el.innerHTML=`${badge}<div class="candidate-name" style="margin-top:6px">${html([p.givenName,p.middleName,p.surname].filter(Boolean).join(" ")||it.name)}</div><div class="muted">${html(p.email||it.email||"")}</div><div class="signature-sticky"><div class="sig-title">Signature block from email</div><pre>${html(p.signature||"No signature block confidently found")}</pre></div>${diagnosticPanel(p)}${existingSummary}${editableFields(p,idx,existing)}${m?`<div class="diffs"><b>Fields available to update</b>${diffs.length?diffs.map(d=>`<label class="diff"><input type="checkbox" data-diff="${idx}" data-key="${d.key}" ${d.defaultChecked?"checked":""}><span>${html(d.label)}</span><span class="vals"><span class="old">Existing: ${html(d.old||"(blank)")}</span><br><span class="new">From email: ${html(d.new)}</span></span></label>`).join(""):"<div class=\"muted\">The email did not provide any new or different nonblank values. Existing Outlook data is shown above and will not be erased.</div>"}</div><div class="toolbar"><button class="btn primary" data-action="update" data-index="${idx}" ${diffs.length?"":"disabled"}>Update Existing Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`:`<div class="toolbar"><button class="btn primary" data-action="create" data-index="${idx}">Create Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`}`;box.appendChild(el)});$("reviewSection").hidden=false;box.querySelectorAll("button[data-action]").forEach(b=>b.addEventListener("click",handleAction));box.querySelectorAll("button[data-notes-action]").forEach(b=>b.addEventListener("click",e=>{const idx=Number(e.currentTarget.dataset.index);const ta=document.querySelector(`textarea[data-review="${idx}"][data-field="personalNotes"]`);if(!ta)return;if(e.currentTarget.dataset.notesAction==="clear")ta.value="";else ta.value=(window.__reviewItems[idx]?.parsed?.signature||"");ta.focus();}));}
 function currentParsed(idx){const d={};document.querySelectorAll(`[data-review="${idx}"][data-field]`).forEach(i=>d[i.dataset.field]=i.value.trim());d.businessPhone=phoneForOutlook(d.businessPhone);d.mobilePhone=phoneForOutlook(d.mobilePhone);d.businessFax=phoneForOutlook(d.businessFax);return d}
 function finishCard(idx,label){const c=document.querySelector(`[data-review-card="${idx}"]`);c.classList.add("done");c.querySelectorAll("button").forEach(b=>b.disabled=true);const span=document.createElement("span");span.className="badge done";span.textContent=label;c.prepend(span)}
-async function handleAction(ev){const action=ev.currentTarget.dataset.action,idx=Number(ev.currentTarget.dataset.index),item=window.__reviewItems[idx];if(action==="skip"){finishCard(idx,"Skipped");return}try{ev.currentTarget.disabled=true;status(action==="create"?"Creating Outlook contact…":"Updating Outlook contact…");const p=currentParsed(idx);if(action==="create"){await graph("/me/contacts",{method:"POST",body:JSON.stringify(graphPayload(p))});finishCard(idx,"Created");status("Contact created in Outlook Contacts.","ok")}else{const selected=new Set([...document.querySelectorAll(`input[data-diff="${idx}"]:checked`)].map(x=>x.dataset.key));if(!selected.size)throw new Error("Check at least one field to update.");await graph(`/me/contacts/${encodeURIComponent(item.match.contact.id)}`,{method:"PATCH",body:JSON.stringify(graphPayload(p,selected))});finishCard(idx,"Updated");status("Existing Outlook contact updated.","ok")}}catch(e){ev.currentTarget.disabled=false;status(e.message||String(e),"error")}}
+async function handleAction(ev){const action=ev.currentTarget.dataset.action,idx=Number(ev.currentTarget.dataset.index),item=window.__reviewItems[idx];if(action==="skip"){finishCard(idx,"Skipped");return}try{ev.currentTarget.disabled=true;status(action==="create"?"Creating Outlook contact…":"Updating Outlook contact…");const p=currentParsed(idx);if(action==="create"){await graph("/me/contacts",{method:"POST",body:JSON.stringify(graphPayload(p))});finishCard(idx,"Created");status("Contact created in Outlook Contacts.","ok")}else{const selected=new Set([...document.querySelectorAll(`input[data-diff="${idx}"]:checked`)].map(x=>x.dataset.key));if(!selected.size)throw new Error("Check at least one field to update.");await graph(`/me/contacts/${encodeURIComponent(item.match.contact.id)}`,{method:"PATCH",body:JSON.stringify(graphPayload(p,selected,existingFlat(item.match.contact)))});finishCard(idx,"Updated");status("Existing Outlook contact updated.","ok")}}catch(e){ev.currentTarget.disabled=false;status(e.message||String(e),"error")}}
 async function compareSelected(){try{const selected=[...document.querySelectorAll("input[data-candidate]:checked")].map(x=>candidates[Number(x.dataset.candidate)]);if(!selected.length)throw new Error("Select at least one person first.");if(!clientId()){showAuthSetup();throw new Error("Complete the one-time Microsoft Contacts setup first.")}status("Signing in to Microsoft and checking Outlook Contacts…");graphContacts=await loadContacts();const items=selected.map(c=>({...c,match:matchContact(c.parsed)}));window.__reviewItems=items;renderReviews(items);status(`Compared ${items.length} selected contact${items.length===1?"":"s"} with ${graphContacts.length} Outlook contact${graphContacts.length===1?"":"s"}.`,"ok")}catch(e){status(e.message||String(e),"error")}}
 
 Office.onReady(async info=>{if(info.host!==Office.HostType.Outlook){status("This page must be opened from the Outlook add-in.","error");return}showAuthSetup();$("saveClientId").addEventListener("click",()=>{const id=$("clientId").value.trim();if(!/^[0-9a-f-]{36}$/i.test(id)){status("That does not look like a Microsoft Application (client) ID.","error");return}localStorage.setItem("ccfe_client_id",id);msalInstance=null;showAuthSetup();status("Client ID saved. You can now compare contacts.","ok")});$("selectAll").addEventListener("click",()=>document.querySelectorAll("input[data-candidate]").forEach(x=>x.checked=true));$("selectNone").addEventListener("click",()=>document.querySelectorAll("input[data-candidate]").forEach(x=>x.checked=false));$("scanAgain").addEventListener("click",scan);$("compareSelected").addEventListener("click",compareSelected);await scan()});
