@@ -24,25 +24,74 @@ function phoneForOutlook(value){
   let d=main;if(d.length===11&&d.startsWith("1"))d=d.slice(1);
   return ext?`${d}x${ext}`:d;
 }
-function phoneTokens(sig){const re=/(?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]?)\d{3}[\s.\-]\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d+)?/gi,c=[];for(const line of norm(sig).split("\n")){const ms=[...line.matchAll(re)];for(let i=0;i<ms.length;i++){const m=ms[i],prev=i===0?0:ms[i-1].index+ms[i-1][0].length;c.push({context:line.slice(prev,m.index).trim(),value:m[0].trim()})}}return c}
+function phoneTokens(sig){
+  const re=/(?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]?)\d{3}[\s.\-]\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d+)?/gi,c=[];
+  for(const line of norm(sig).split("\n")){
+    const ms=[...line.matchAll(re)];
+    for(let i=0;i<ms.length;i++){
+      const m=ms[i];
+      const prev=i===0?0:ms[i-1].index+ms[i-1][0].length;
+      const next=i+1<ms.length?ms[i+1].index:line.length;
+      c.push({
+        before:line.slice(prev,m.index).trim(),
+        after:line.slice(m.index+m[0].length,next).trim(),
+        value:m[0].trim()
+      });
+    }
+  }
+  return c
+}
 function phones(sig){
   const c=phoneTokens(sig);
-  const pick=(rx)=>{const x=c.find(y=>rx.test(y.context));return x?x.value:""};
-  const mobile=pick(/\b(mobile|cell|cellular)\b|(?:^|[|•;\s])\(?\s*(?:m|c)\s*\)?\s*[:.-]?\s*$/i);
-  const fax=pick(/\bfax\b|(?:^|[|•;\s])\(?\s*f\s*\)?\s*[:.-]?\s*$/i);
-  const direct=pick(/\bdirect\b|(?:^|[|•;\s])\(?\s*d\s*\)?\s*[:.-]?\s*$/i);
-  const office=pick(/\b(office|business|phone|tel|telephone)\b|(?:^|[|•;\s])\(?\s*(?:o|p|t)\s*\)?\s*[:.-]?\s*$/i);
+  const has=(x,rx)=>rx.test((x.before+" "+x.after).trim());
+  const mobileRx=/\b(mobile|cell|cellular)\b|(?:^|[|•;\s])\(?\s*(?:m|c)\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
+  const faxRx=/\bfax\b|(?:^|[|•;\s])\(?\s*f\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
+  const directRx=/\bdirect\b|(?:^|[|•;\s])\(?\s*d\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
+  const officeRx=/\b(office|business|phone|tel|telephone)\b|(?:^|[|•;\s])\(?\s*(?:o|p|t)\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
+  const mobile=(c.find(x=>has(x,mobileRx))||{}).value||"";
+  const fax=(c.find(x=>has(x,faxRx))||{}).value||"";
+  const direct=(c.find(x=>has(x,directRx))||{}).value||"";
+  const office=(c.find(x=>has(x,officeRx))||{}).value||"";
   let business=direct||office;
-  if(!business){const u=c.find(y=>y.value!==mobile&&y.value!==fax);business=u?u.value:""}
+  if(!business){const u=c.find(x=>x.value!==mobile&&x.value!==fax);business=u?u.value:""}
   return{businessPhone:phoneForOutlook(business),mobilePhone:phoneForOutlook(mobile),businessFax:phoneForOutlook(fax)}
+}
+function decodeProofpointUrl(v){
+  const raw=String(v||"").trim();
+  if(!/urldefense\.proofpoint\.com\/v2\/url/i.test(raw))return raw;
+  try{
+    const u=new URL(raw);
+    let enc=u.searchParams.get("u")||"";
+    if(!enc)return raw;
+    // Proofpoint v2 encodes punctuation as -HH and slashes as underscores.
+    enc=enc.replace(/-([0-9A-Fa-f]{2})/g,(_,h)=>String.fromCharCode(parseInt(h,16))).replace(/_/g,"/");
+    return decodeURIComponent(enc);
+  }catch(_){return raw}
+}
+function normalizeWebsiteUrl(v){
+  let raw=decodeProofpointUrl(v).trim().replace(/[),.;]+$/g,"");
+  if(!raw)return"";
+  if(!/^https?:\/\//i.test(raw))raw="https://"+raw;
+  try{
+    const u=new URL(raw);
+    if(/^www\./i.test(u.hostname)||u.hostname.split(".").length>=2){
+      const host=u.hostname.toLowerCase();
+      return "https://"+host.replace(/^www\./,"");
+    }
+  }catch(_){ }
+  return raw;
 }
 function isJunkResourceUrl(v){return /(?:\.(?:png|jpe?g|gif|svg|webp|bmp|ico)(?:[?#]|$)|^cid:|^data:|\/image\/|\/images\/|\/logo[s]?\/|safelinks\.protection\.outlook\.com|google\.[^/]+\/maps|maps\.google\.|maps\.apple\.|bing\.com\/maps|goo\.gl\/maps)/i.test(v||"")}
 function website(sig,senderEmail){
-  const re=/\b(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s|]*)?/i;
+  const proof=/https?:\/\/urldefense\.proofpoint\.com\/v2\/url\?[^\s|]+/i;
+  const normal=/\b(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s|]*)?/i;
   for(const line of norm(sig).split("\n")){
-    if(line.includes("@"))continue;const m=line.match(re);if(!m)continue;
-    const v=m[0].replace(/[),.;]+$/,"");if(isJunkResourceUrl(v))continue;
-    return /^https?:\/\//i.test(v)?v:"https://"+v;
+    if(line.includes("@")&&!proof.test(line))continue;
+    let m=line.match(proof)||line.match(normal);if(!m)continue;
+    let v=m[0];
+    if(isJunkResourceUrl(v)&&!/urldefense\.proofpoint\.com/i.test(v))continue;
+    v=normalizeWebsiteUrl(v);
+    if(v&&!/urldefense\.proofpoint\.com/i.test(v))return v;
   }
   const email=cleanEmail(senderEmail);const domain=email.split("@")[1]||"";
   const personal=/^(gmail|outlook|hotmail|live|icloud|me|aol|yahoo|protonmail|msn)\./i;
@@ -98,7 +147,7 @@ const US_STATES=new Set(["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI",
 function usCountry(state){return US_STATES.has(String(state||"").toUpperCase())?"United States":""}
 function address(sig){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
-  const streetWord=/\b(street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|suite|ste\.?|floor|fl\.?|bldg|building|p\.?o\.?\s*box)\b/i;
+  const streetWord=/\b(street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|loop|terrace|ter\.?|court|ct\.?|suite|ste\.?|floor|fl\.?|bldg|building|p\.?o\.?\s*box)\b/i;
   const cityStateZip=/^([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/;
   for(let i=0;i<lines.length;i++){
     const line=lines[i];
@@ -179,7 +228,7 @@ function cleanSignatureText(sig){
   return norm(sig).split("\n").map(x=>x.trim()).filter(Boolean).filter(line=>{
     if(/^(?:https?:\/\/)?[^\s]+\.(?:png|jpe?g|gif|svg|webp|bmp|ico)(?:[?#].*)?$/i.test(line))return false;
     if(/^cid:|^data:image/i.test(line))return false;
-    if(/(?:google\.[^/]+\/maps|maps\.google\.|maps\.apple\.|bing\.com\/maps|goo\.gl\/maps|safelinks\.protection\.outlook\.com)/i.test(line))return false;
+    if(/(?:google\.[^/]+\/maps|maps\.google\.|maps\.apple\.|bing\.com\/maps|goo\.gl\/maps|safelinks\.protection\.outlook\.com|urldefense\.proofpoint\.com\/v2\/url\?)/i.test(line))return false;
     return true;
   }).join("\n")
 }
@@ -211,7 +260,7 @@ function htmlBodyToText(htmlText){
       if(!visible){
         if(/^mailto:/i.test(href)) visible=decodeURIComponent(href.replace(/^mailto:/i,"").split("?")[0]);
         else if(/^tel:/i.test(href)) visible=decodeURIComponent(href.replace(/^tel:/i,"").split("?")[0]);
-        else if(/^https?:/i.test(href)&&!isJunkResourceUrl(href)) visible=href;
+        else if(/^https?:/i.test(href)){ const decoded=decodeProofpointUrl(href); if(!isJunkResourceUrl(decoded)) visible=normalizeWebsiteUrl(decoded); }
       }
       if(isJunkResourceUrl(visible))visible="";
       a.replaceWith(doc.createTextNode(visible?` ${visible} `:" "));
