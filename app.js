@@ -1,7 +1,7 @@
 import { createNestablePublicClientApplication, InteractionRequiredAuthError } from "https://cdn.jsdelivr.net/npm/@azure/msal-browser@5.1.0/+esm";
 
 const GRAPH_SCOPES=["Contacts.ReadWrite"];
-const TITLE_WORDS=["project executive","senior project manager","project manager","assistant project manager","project engineer","project coordinator","construction manager","assistant general manager","general manager","superintendent","estimator","vice president","president","principal","partner","director","manager","architect","engineer","designer","consultant","owner","coordinator"];
+const TITLE_WORDS=["project executive","senior project manager","project manager","assistant project manager","project engineer","project coordinator","construction manager","assistant general manager","general manager","superintendent","estimator","vice president","president","principal","partner","associate","director","manager","architect","engineer","designer","consultant","owner","coordinator"];
 const COMPANY_WORDS=[" llc"," l.l.c"," inc"," corp"," company"," co."," construction"," builders"," building"," architecture"," architects"," engineering"," engineers"," associates"," group"," studio"," mechanical"," electric"," electrical"," plumbing"," design"," contractors"," contractor"," garage"," workshop"," services"," solutions"," systems"," enterprises"," partners"];
 const CREDENTIALS=new Set(["AIA","PE","P.E.","RA","R.A.","LEED","PMP","NCARB","FAIA","SE","S.E."]);
 const FIELD_META={
@@ -98,7 +98,24 @@ function website(sig,senderEmail){
   if(domain&&!personal.test(domain))return "https://"+domain.toLowerCase();
   return "";
 }
-function title(sig){for(const line of norm(sig).split("\n").map(x=>x.trim()).filter(Boolean)){const low=line.toLowerCase();if(line.length<=100&&TITLE_WORDS.some(t=>low.includes(t))&&!COMPANY_WORDS.some(w=>(" "+low).includes(w)))return line.replace(/^[-|•\s]+|[-|•\s]+$/g,"")}return""}
+function title(sig){
+  const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i],low=line.toLowerCase();
+    if(line.length>100||!TITLE_WORDS.some(t=>low.includes(t))||COMPANY_WORDS.some(w=>(" "+low).includes(w)))continue;
+    let out=line;
+    const person=personNameFromLine(line);
+    if(person&&out.toLowerCase().startsWith(person.toLowerCase()))out=out.slice(person.length).replace(/^[-|•·—–\s]+/,"");
+    out=out.replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"");
+    const next=lines[i+1]||"",nextLow=next.toLowerCase();
+    if(next&&/^\s*[|•·—–]/.test(next)&&TITLE_WORDS.some(t=>nextLow.includes(t))){
+      const extra=next.replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"");
+      if(extra)out=(out?out+" | ":"")+extra;
+    }
+    if(out)return out;
+  }
+  return"";
+}
 function looksLikePersonName(line){
   const v=(line||"").trim();if(!v||v.length<4||v.length>55)return false;
   if(cleanEmail(v)||/\d|https?:|www\.|@|\b(?:street|st\.?|road|rd\.?|ave\.?|avenue|blvd\.?|boulevard|suite|ste\.?|drive|dr\.?|lane|ln\.?|city|inc\.?|llc|corp\.?|company|garage|workshop)\b/i.test(v))return false;
@@ -106,12 +123,22 @@ function looksLikePersonName(line){
   const words=v.replace(/[,]/g," ").split(/\s+/).filter(Boolean);if(words.length<2||words.length>5)return false;
   return words.every(w=>/^[A-Za-z][A-Za-z'.-]*$/.test(w));
 }
+function personNameFromLine(line){
+  const raw=(line||"").trim();
+  if(looksLikePersonName(raw))return raw;
+  // Many signatures put the name and title on the same visual line:
+  // "Linda Shin | Associate" or "Jason Ro • Principal".
+  const pieces=raw.split(/\s*(?:\||•|·|—|–)\s*/).map(x=>x.trim()).filter(Boolean);
+  if(pieces.length>1 && looksLikePersonName(pieces[0]))return pieces[0];
+  return "";
+}
 function inferPersonName(sig){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
   for(let i=0;i<Math.min(lines.length,12);i++){
-    if(looksLikePersonName(lines[i])){
+    const found=personNameFromLine(lines[i]);
+    if(found){
       const next=(lines[i+1]||"").toLowerCase();
-      if(!next||TITLE_WORDS.some(t=>next.includes(t))||COMPANY_WORDS.some(w=>(" "+next).includes(w)))return lines[i];
+      if(!next||TITLE_WORDS.some(t=>next.includes(t))||COMPANY_WORDS.some(w=>(" "+next).includes(w))||lines[i].includes("|")||lines[i].includes("•"))return found;
     }
   }
   return "";
@@ -344,7 +371,7 @@ function inferAnchoredName(sig,email){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
   const emailIdx=lines.findIndex(l=>cleanEmail(l)===cleanEmail(email));
   const stop=emailIdx>=0?emailIdx:lines.length;
-  for(let i=stop-1;i>=Math.max(0,stop-8);i--){if(looksLikePersonName(lines[i]))return lines[i]}
+  for(let i=stop-1;i>=Math.max(0,stop-8);i--){const found=personNameFromLine(lines[i]);if(found)return found}
   return inferPersonName(sig);
 }
 
@@ -396,18 +423,57 @@ function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
     const existing=byEmail.get(email);
     if(!existing||score>existing.score)byEmail.set(email,{score,name,email,text:sig,parsed});
   }
-  // If the current sender has no email printed in the signature, preserve the legacy segment
-  // method only as a fallback for that sender.
+  // Current-sender fallback when the signature itself does not print an email address.
+  // Outlook's From name/address are authoritative for the current message. Do NOT require
+  // the signature parser to rediscover the sender's name exactly; visually similar HTML
+  // signatures can put "Name | Title" in one cell and would otherwise be rejected.
   if(currentEmail&&!sameEmail(currentEmail,myEmail)&&!byEmail.has(currentEmail.toLowerCase())){
     const legacy=splitMessage(body,currentName,currentEmail).find(x=>sameEmail(x.email,currentEmail));
     if(legacy){
-      const parsed=parseContact(legacy.name,legacy.email,legacy.text);
-      const actualSigName=inferAnchoredName(parsed.signature,"");
-      const sigName=String(actualSigName||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
-      const curName=String(currentName||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
-      // Only keep this weaker fallback if the signature itself clearly belongs to the
-      // current sender; otherwise it is safer to omit it than attach someone else's block.
-      if(parsed.signature && curName && sigName===curName)byEmail.set(currentEmail.toLowerCase(),{score:1,name:legacy.name,email:legacy.email,text:legacy.text,parsed});
+      let rawSig=isolateSignature(legacy.text,legacy.email);
+      // If Outlook gives us a trustworthy current-sender name, use the matching visible
+      // name line as the beginning of the signature. This preserves lines such as
+      // "Linda Shin | Associate" that a score-only fallback can otherwise drop.
+      const rawLines=norm(legacy.text).split("\n").map(x=>x.trim());
+      const wanted=String(currentName||legacy.name||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+      let nameAt=-1;
+      for(let j=0;j<rawLines.length;j++){
+        const pn=personNameFromLine(rawLines[j]);
+        const key=String(pn||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+        if(wanted&&key===wanted){nameAt=j;break}
+      }
+      if(nameAt>=0){
+        const kept=[];
+        for(let j=nameAt;j<rawLines.length&&kept.length<16;j++){
+          const v=rawLines[j];
+          if(j>nameAt && /^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(v))break;
+          if(j>nameAt && /confidential|privileged|intended recipient|virus|disclaimer/i.test(v))break;
+          if(v)kept.push(v);
+        }
+        if(kept.length>=3)rawSig=kept.join("\n");
+      }
+      const sig=cleanSignatureText(rawSig);
+      const parsed=parseContactFromSignature(currentName||legacy.name,legacy.email,sig);
+      const sigScore=norm(sig).split("\n").reduce((t,l)=>t+signatureScore(l),0);
+      const ph=phones(sig),addr=address(sig),site=website(sig,legacy.email);
+      const evidence=[
+        !!(ph.businessPhone||ph.mobilePhone),
+        !!(addr.state&&addr.postalCode),
+        !!site,
+        !!company(sig,currentName||legacy.name,legacy.email,site),
+        !!title(sig)
+      ].filter(Boolean).length;
+      // Require a genuinely signature-like block, but trust Outlook for who the current
+      // sender is. This keeps the safety check without rejecting signatures lacking email.
+      if(sig && looksLikePersonName(currentName||legacy.name||"") && sigScore>=5 && evidence>=2){
+        const np=nameParts(currentName||legacy.name);
+        parsed.givenName=np.givenName; parsed.middleName=np.middleName; parsed.surname=np.surname;
+        parsed.email=legacy.email;
+        parsed.signature=sig;
+        parsed.personalNotes=sig;
+        parsed._debug={source:"Current sender fallback (Outlook From header)",htmlSignature:"",textSignature:sig};
+        byEmail.set(currentEmail.toLowerCase(),{score:sigScore,name:currentName||legacy.name,email:legacy.email,text:sig,parsed});
+      }
     }
   }
   return [...byEmail.values()].map(x=>({name:x.name,email:x.email,text:x.text,parsed:x.parsed}));
