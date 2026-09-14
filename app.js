@@ -375,11 +375,73 @@ function inferAnchoredName(sig,email){
   return inferPersonName(sig);
 }
 
+function currentSenderSignatureFromBody(body,currentName){
+  const lines=norm(body).split("\n").map(x=>x.trim());
+  const wanted=String(currentName||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+  if(!wanted)return "";
+  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
+  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
+  const normKey=v=>String(v||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+  const hits=[];
+  for(let i=0;i<lines.length;i++){
+    const key=normKey(lines[i]);
+    // Accept "Linda Shin | Associate", "Linda Shin - Architect", etc.
+    if(key===wanted || key.startsWith(wanted+" "))hits.push(i);
+  }
+  let best=null;
+  for(const start of hits){
+    const kept=[];
+    let blankRun=0;
+    for(let j=start;j<lines.length && kept.length<18;j++){
+      const v=lines[j];
+      if(j>start && (isHeader(v)||isDisclaimer(v)))break;
+      if(!v){
+        blankRun++;
+        if(blankRun>=2 && kept.length>=4)break;
+        continue;
+      }
+      blankRun=0;
+      kept.push(v);
+      // Once we have a substantial signature, stop before obvious prose that follows it.
+      if(kept.length>=6 && v.length>120 && /[.!?]$/.test(v))break;
+    }
+    const sig=cleanSignatureText(kept.join("\n"));
+    const parsed=parseContactFromSignature(currentName,"",sig);
+    const evidence=[
+      !!(parsed.companyName),
+      !!(parsed.businessPhone||parsed.mobilePhone),
+      !!(parsed.state&&parsed.postalCode),
+      !!parsed.businessHomePage,
+      !!parsed.jobTitle
+    ].filter(Boolean).length;
+    const score=signatureScore(lines[start]||"")+evidence*3+norm(sig).split("\n").filter(Boolean).length/10;
+    if(sig && (!best||score>best.score))best={score,sig};
+  }
+  return best?best.sig:"";
+}
+
 function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
   const lines=norm(body).split("\n").map(x=>x.trim());
   const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
   const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
   const byEmail=new Map();
+  // v2.5.7: treat the current Outlook sender separately from generic chain detection.
+  // Outlook already gives us an authoritative From name + email. If that sender's visible
+  // name appears in the body, build the signature directly from that point forward even
+  // when the signature itself contains no printed email address or mailto link.
+  if(currentEmail&&!sameEmail(currentEmail,myEmail)&&looksLikePersonName(currentName||"")){
+    const directSig=currentSenderSignatureFromBody(body,currentName);
+    if(directSig){
+      const parsed=parseContactFromSignature(currentName,currentEmail,directSig);
+      const np=nameParts(currentName);
+      parsed.givenName=np.givenName;parsed.middleName=np.middleName;parsed.surname=np.surname;
+      parsed.email=currentEmail.toLowerCase();
+      parsed.signature=directSig;parsed.personalNotes=directSig;
+      parsed._debug={source:"Current sender — Outlook From header + visible name anchor",htmlSignature:"",textSignature:directSig};
+      const directScore=norm(directSig).split("\n").reduce((t,l)=>t+signatureScore(l),0)+10;
+      byEmail.set(currentEmail.toLowerCase(),{score:directScore,name:currentName,email:currentEmail.toLowerCase(),text:directSig,parsed});
+    }
+  }
   for(let i=0;i<lines.length;i++){
     if(isHeader(lines[i]))continue;
     const email=cleanEmail(lines[i]);
