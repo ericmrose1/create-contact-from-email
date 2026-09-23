@@ -171,8 +171,17 @@ function companyFromDomain(senderEmail,site){
   if(!domain&&site){try{domain=new URL(/^https?:\/\//i.test(site)?site:"https://"+site).hostname}catch(_){domain=""}}
   domain=domain.toLowerCase().replace(/^www\./,"");
   if(!domain||/^(gmail|outlook|hotmail|live|icloud|me|aol|yahoo|protonmail|msn)\./i.test(domain))return"";
-  const stem=domain.split(".")[0].replace(/[-_]+/g," ").trim();
+  let stem=domain.split(".")[0].replace(/[-_]+/g," ").trim();
   if(!stem)return"";
+  if(!/\s/.test(stem)){
+    const suffixes=["construction","concrete","electric","electrical","engineering","architects","architecture","design","builders","building","mechanical","plumbing","contractors","contractor","services","solutions","systems","garage","workshop"];
+    for(const s of suffixes){
+      if(stem.toLowerCase().endsWith(s) && stem.length>s.length+1){
+        stem=stem.slice(0,-s.length)+" "+stem.slice(-s.length);
+        break;
+      }
+    }
+  }
   return stem.split(/\s+/).map(w=>/^\d+$/.test(w)?w:(w.charAt(0).toUpperCase()+w.slice(1))).join(" ");
 }
 function company(sig,name,senderEmail,site){
@@ -714,7 +723,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.6.1 — OCR fallback and image-signature repair.
+// v2.6.3 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -802,6 +811,82 @@ function ocrJobTitle(text,currentName){
   }
   return"";
 }
+
+function strictOcrPhones(text){
+  const raw=norm(text).replace(/©/g,"O").replace(/®/g,"O");
+  const out={businessPhone:"",mobilePhone:"",businessFax:""};
+  const patterns=[
+    ["businessPhone",/(?:^|[\n|•;\s])(?:office|business|phone|tel|telephone|O|0)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im],
+    ["mobilePhone",/(?:^|[\n|•;\s])(?:mobile|cell|cellular|M|C)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im],
+    ["businessFax",/(?:^|[\n|•;\s])(?:fax|F)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im]
+  ];
+  for(const [key,rx] of patterns){
+    const m=raw.match(rx);
+    if(m)out[key]=phoneForOutlook(m[1]+(m[2]?` x${m[2]}`:""));
+  }
+  // OCR sometimes drops the leading O label but still reads a single phone + extension.
+  // In that narrow case, use it as Business/Office only. Never invent Mobile or Fax.
+  if(!out.businessPhone){
+    const matches=[...raw.matchAll(/((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/gi)];
+    if(matches.length===1)out.businessPhone=phoneForOutlook(matches[0][1]+(matches[0][2]?` x${matches[0][2]}`:""));
+  }
+  if(out.businessPhone===out.mobilePhone)out.mobilePhone="";
+  if(out.businessPhone===out.businessFax)out.businessFax="";
+  return out;
+}
+function ocrCompanyFromText(text,currentEmail,site){
+  const lines=norm(text).split("\n").map(x=>x.replace(/\s+/g," ").trim()).filter(Boolean);
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i],low=" "+line.toLowerCase();
+    if(cleanEmail(line)||/^www\.|https?:/i.test(line)||/\d{3}[\s.\-]*\d{3}/.test(line))continue;
+    if(COMPANY_WORDS.some(w=>low.includes(w))){
+      if(/^(concrete|construction|design|engineering|electric|electrical|builders|architects|architecture)$/i.test(line) && i>0){
+        const prev=lines[i-1];
+        if(prev && prev.length<35 && !cleanEmail(prev) && !/\d/.test(prev) && !TITLE_WORDS.some(t=>prev.toLowerCase().includes(t))){
+          return smartTitleCase(prev+" "+line);
+        }
+      }
+      return smartTitleCase(line);
+    }
+  }
+  return companyFromDomain(currentEmail,site);
+}
+function sourceToDataUrl(src){
+  return new Promise((resolve)=>{
+    if(/^data:image\//i.test(src||""))return resolve(src);
+    try{
+      const im=new Image();im.crossOrigin="anonymous";
+      im.onload=()=>{
+        try{
+          const c=document.createElement("canvas");c.width=im.naturalWidth;c.height=im.naturalHeight;
+          c.getContext("2d").drawImage(im,0,0);resolve(c.toDataURL("image/png"));
+        }catch(_){resolve("")}
+      };
+      im.onerror=()=>resolve("");
+      im.src=src;
+    }catch(_){resolve("")}
+  });
+}
+function cropSignatureTextSide(src){
+  return new Promise(async resolve=>{
+    try{
+      const data=await sourceToDataUrl(src);if(!data)return resolve("");
+      const im=new Image();
+      im.onload=()=>{
+        try{
+          if(!im.naturalWidth||!im.naturalHeight||im.naturalWidth/im.naturalHeight<2.2)return resolve("");
+          const c=document.createElement("canvas");
+          c.width=Math.max(1,Math.floor(im.naturalWidth*0.58));c.height=im.naturalHeight;
+          c.getContext("2d").drawImage(im,0,0,c.width,im.naturalHeight,0,0,c.width,im.naturalHeight);
+          resolve(c.toDataURL("image/png"));
+        }catch(_){resolve("")}
+      };
+      im.onerror=()=>resolve("");
+      im.src=data;
+    }catch(_){resolve("")}
+  });
+}
+
 function repairOcrStateAndCountry(parsed,text){
   const out={...parsed};
   let st=String(out.state||"").toUpperCase().trim();
@@ -825,8 +910,15 @@ function repairOcrParsed(parsed,text,currentName,currentEmail){
   let out={...parsed};
   const exactTitle=ocrJobTitle(text,currentName);
   if(exactTitle)out.jobTitle=exactTitle;
-  Object.assign(out,phones(text));
+  const strictPhones=strictOcrPhones(text);
+  out.businessPhone=strictPhones.businessPhone;
+  out.mobilePhone=strictPhones.mobilePhone;
+  out.businessFax=strictPhones.businessFax;
   out=repairOcrStateAndCountry(out,text);
+  const site=website(text,currentEmail)||out.businessHomePage||"";
+  out.businessHomePage=site;
+  const co=ocrCompanyFromText(text,currentEmail,site);
+  if(co)out.companyName=co;
   // Outlook's From header remains authoritative for the sender identity/email.
   const np=nameParts(currentName||[out.givenName,out.surname].filter(Boolean).join(" "));
   if(currentName)Object.assign(out,np);
@@ -856,13 +948,21 @@ async function imageSignatureCandidate(item,htmlText,currentName,currentEmail,my
   let worker=null,best=null;
   try{
     worker=await T.createWorker("eng");
-    for(let i=0;i<sources.length;i++){
-      status(`Reading signature image ${i+1} of ${sources.length}…`);
+    try{await worker.setParameters({tessedit_pageseg_mode:"6"});}catch(_){}
+    let jobs=[];
+    for(const src of sources){
+      jobs.push({src,kind:"full"});
+      const crop=await cropSignatureTextSide(src);
+      if(crop)jobs.push({src:crop,kind:"text-side crop"});
+    }
+    for(let i=0;i<jobs.length;i++){
+      status(`Reading signature image ${Math.floor(i/2)+1}…`);
       try{
-        const r=await worker.recognize(sources[i]);
+        const r=await worker.recognize(jobs[i].src);
         const text=cleanSignatureText(r?.data?.text||"");
-        const score=ocrSignatureScore(text,currentName,currentEmail);
-        if(!best||score>best.score)best={score,text};
+        let score=ocrSignatureScore(text,currentName,currentEmail);
+        if(jobs[i].kind==="text-side crop")score+=3;
+        if(!best||score>best.score)best={score,text,kind:jobs[i].kind};
       }catch(_){ }
     }
   }finally{try{if(worker)await worker.terminate()}catch(_){ }}
@@ -871,7 +971,7 @@ async function imageSignatureCandidate(item,htmlText,currentName,currentEmail,my
   parsed=repairOcrParsed(parsed,best.text,currentName,currentEmail);
   parsed.signature=best.text;
   parsed.personalNotes=best.text;
-  parsed._debug={source:"Image OCR fallback",htmlSignature:"",textSignature:best.text,ocrScore:best.score};
+  parsed._debug={source:`Image OCR fallback — ${best.kind}`,htmlSignature:"",textSignature:best.text,ocrScore:best.score};
   return {name:currentName||[parsed.givenName,parsed.surname].filter(Boolean).join(" "),email:parsed.email,text:best.text,parsed};
 }
 
@@ -984,3 +1084,40 @@ async function handleAction(ev){const action=ev.currentTarget.dataset.action,idx
 async function compareSelected(){try{const selected=[...document.querySelectorAll("input[data-candidate]:checked")].map(x=>candidates[Number(x.dataset.candidate)]);if(!selected.length)throw new Error("Select at least one person first.");if(!clientId()){showAuthSetup();throw new Error("Complete the one-time Microsoft Contacts setup first.")}status("Signing in to Microsoft and checking Outlook Contacts…");graphContacts=await loadContacts();const items=selected.map(c=>({...c,match:matchContact(c.parsed)}));window.__reviewItems=items;renderReviews(items);status(`Compared ${items.length} selected contact${items.length===1?"":"s"} with ${graphContacts.length} Outlook contact${graphContacts.length===1?"":"s"}.`,"ok")}catch(e){status(e.message||String(e),"error")}}
 
 Office.onReady(async info=>{if(info.host!==Office.HostType.Outlook){status("This page must be opened from the Outlook add-in.","error");return}showAuthSetup();$("saveClientId").addEventListener("click",()=>{const id=$("clientId").value.trim();if(!/^[0-9a-f-]{36}$/i.test(id)){status("That does not look like a Microsoft Application (client) ID.","error");return}localStorage.setItem("ccfe_client_id",id);msalInstance=null;showAuthSetup();status("Client ID saved. You can now compare contacts.","ok")});$("selectAll").addEventListener("click",()=>document.querySelectorAll("input[data-candidate]").forEach(x=>x.checked=true));$("selectNone").addEventListener("click",()=>document.querySelectorAll("input[data-candidate]").forEach(x=>x.checked=false));$("scanAgain").addEventListener("click",scan);$("compareSelected").addEventListener("click",compareSelected);await scan()});
+
+
+function collapseParserDiagnostic(){
+  try{
+    const candidates=[
+      document.getElementById("parserDiagnostic"),
+      document.querySelector(".parser-diagnostic"),
+      ...Array.from(document.querySelectorAll("details,div,section")).filter(el=>/parser diagnostic/i.test(el.textContent||""))
+    ].filter(Boolean);
+    const panel=candidates[0];
+    if(!panel)return;
+    if(panel.tagName==="DETAILS"){ panel.open=false; return; }
+    panel.classList.add("diagnostic-panel");
+    panel.classList.remove("open");
+    if(!document.getElementById("toggleParserDiagnostic")){
+      const b=document.createElement("button");
+      b.type="button"; b.id="toggleParserDiagnostic"; b.className="diagnostic-toggle"; b.textContent="Show diagnostic";
+      b.addEventListener("click",()=>{
+        const open=panel.classList.toggle("open");
+        b.textContent=open?"Hide diagnostic":"Show diagnostic";
+      });
+      panel.parentNode.insertBefore(b,panel);
+    }
+  }catch(_){}
+}
+document.addEventListener("click",(e)=>{
+  if(e.target && e.target.id==="toggleParserDiagnostic"){
+    const panel=document.getElementById("parserDiagnostic")||document.querySelector(".parser-diagnostic,.diagnostic-panel");
+    if(panel && panel.tagName!=="DETAILS"){
+      const open=panel.classList.toggle("open");
+      e.target.textContent=open?"Hide diagnostic":"Show diagnostic";
+    }
+  }
+});
+
+
+setInterval(collapseParserDiagnostic, 500);
