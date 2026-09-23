@@ -2,7 +2,7 @@ import { createNestablePublicClientApplication, InteractionRequiredAuthError } f
 
 const GRAPH_SCOPES=["Contacts.ReadWrite"];
 const TITLE_WORDS=["project executive","senior project manager","project manager","assistant project manager","project engineer","project coordinator","construction manager","assistant general manager","general manager","superintendent","estimator","vice president","president","principal","partner","associate","director","manager","architect","engineer","designer","consultant","owner","coordinator"];
-const COMPANY_WORDS=[" llc"," l.l.c"," inc"," corp"," company"," co."," construction"," builders"," building"," architecture"," architects"," engineering"," engineers"," associates"," group"," studio"," mechanical"," electric"," electrical"," plumbing"," design"," contractors"," contractor"," garage"," workshop"," services"," solutions"," systems"," enterprises"," partners"];
+const COMPANY_WORDS=[" llc"," l.l.c"," inc"," corp"," company"," co."," construction"," builders"," building"," architecture"," architects"," engineering"," engineers"," associates"," group"," studio"," mechanical"," electric"," electrical"," plumbing"," design"," contractors"," contractor"," concrete"," masonry"," garage"," workshop"," services"," solutions"," systems"," enterprises"," partners"];
 const CREDENTIALS=new Set(["AIA","PE","P.E.","RA","R.A.","LEED","PMP","NCARB","FAIA","SE","S.E."]);
 const FIELD_META={
   givenName:"First name",middleName:"Middle name",surname:"Last name",companyName:"Company",jobTitle:"Job title",email:"Email",
@@ -18,14 +18,14 @@ function cleanName(s){return (s||"").replace(/<[^>]+>/g,"").replace(/\([^)]*\)/g
 function nameParts(display){let n=cleanName(display);if(n.includes(",")){const a=n.split(",",2).map(x=>x.trim());n=(a[1]+" "+a[0]).trim()}const t=n.split(/\s+/).filter(Boolean).filter(x=>!CREDENTIALS.has(x.toUpperCase()));if(!t.length)return{givenName:"",middleName:"",surname:""};if(t.length===1)return{givenName:t[0],middleName:"",surname:""};if(t.length===2)return{givenName:t[0],middleName:"",surname:t[1]};return{givenName:t[0],middleName:t.slice(1,-1).join(" "),surname:t[t.length-1]}}
 function phoneForOutlook(value){
   const raw=String(value||"").trim();if(!raw)return"";
-  const extMatch=raw.match(/(?:^|\s)(?:x|ext\.?|extension)\s*(\d+)\s*$/i);
+  const extMatch=raw.match(/(?:^|\s)(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+)\s*$/i);
   const ext=extMatch?extMatch[1]:"";
   const main=(extMatch?raw.slice(0,extMatch.index):raw).replace(/\D/g,"");
   let d=main;if(d.length===11&&d.startsWith("1"))d=d.slice(1);
   return ext?`${d}x${ext}`:d;
 }
 function phoneTokens(sig){
-  const re=/(?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]?)\d{3}[\s.\-]\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d+)?/gi,c=[];
+  const re=/(?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]?)\d{3}[\s.\-]\d{4}(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*\d+)?/gi,c=[];
   for(const line of norm(sig).split("\n")){
     const ms=[...line.matchAll(re)];
     for(let i=0;i<ms.length;i++){
@@ -689,6 +689,119 @@ function diagnosticPanel(parsed){
   return `<details class="diagnostic" open><summary>Parser diagnostic — what the add-in actually detected</summary><div class="diag-source">Source used: ${html(d.source||"email signature")}</div>${diagnosticRows(parsed)}<div class="diag-block"><b>Signature text used for Notes</b><pre>${html(parsed.signature||"(none)")}</pre></div>${d.htmlSignature&&d.textSignature&&d.htmlSignature!==d.textSignature?`<div class="diag-block"><b>HTML signature candidate</b><pre>${html(d.htmlSignature)}</pre><b>Plain-text signature candidate</b><pre>${html(d.textSignature)}</pre></div>`:""}</details>`;
 }
 
+
+
+// v2.6.0 — OCR fallback for image-only signatures.
+// Normal text/HTML parsing still runs first. OCR is invoked only when no usable
+// contact candidate was found, which keeps ordinary emails fast.
+let __tesseractPromise=null;
+function loadTesseract(){
+  if(window.Tesseract)return Promise.resolve(window.Tesseract);
+  if(__tesseractPromise)return __tesseractPromise;
+  __tesseractPromise=new Promise((resolve,reject)=>{
+    const sc=document.createElement("script");
+    sc.src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+    sc.async=true;
+    sc.onload=()=>window.Tesseract?resolve(window.Tesseract):reject(new Error("OCR library loaded but was unavailable."));
+    sc.onerror=()=>reject(new Error("Unable to load the OCR library."));
+    document.head.appendChild(sc);
+  });
+  return __tesseractPromise;
+}
+function imageMimeFromName(name){
+  const n=String(name||"").toLowerCase();
+  if(n.endsWith(".png"))return "image/png";
+  if(n.endsWith(".gif"))return "image/gif";
+  if(n.endsWith(".webp"))return "image/webp";
+  if(n.endsWith(".bmp"))return "image/bmp";
+  return "image/jpeg";
+}
+function attachmentImageDataUrl(item,att){
+  return new Promise(resolve=>{
+    try{
+      item.getAttachmentContentAsync(att.id,r=>{
+        if(r.status!==Office.AsyncResultStatus.Succeeded)return resolve("");
+        const c=r.value||{},content=c.content||"";
+        if(!content)return resolve("");
+        if(/^data:image\//i.test(content))return resolve(content);
+        // File attachments/inline images are normally returned as base64.
+        if(String(c.format||"").toLowerCase().includes("base64") || /^[A-Za-z0-9+/=\r\n]+$/.test(content.slice(0,200))){
+          return resolve(`data:${imageMimeFromName(att.name)};base64,${content.replace(/\s+/g,"")}`);
+        }
+        resolve("");
+      });
+    }catch(_){resolve("")}
+  });
+}
+function htmlImageHints(htmlText){
+  const out=[];
+  try{
+    const doc=new DOMParser().parseFromString(htmlText||"","text/html");
+    for(const img of [...doc.querySelectorAll("img")]){
+      const src=(img.getAttribute("src")||"").trim();
+      if(!src)continue;
+      const w=parseInt(img.getAttribute("width")||img.style?.width||"0",10)||0;
+      const h=parseInt(img.getAttribute("height")||img.style?.height||"0",10)||0;
+      // Signature cards are usually wide; keep unknown-size images too because Outlook
+      // frequently strips width/height attributes from inline images.
+      const likely=(w===0||h===0||(w>=220&&h>=55)||(w/h>=2.2&&w>=180));
+      if(!likely)continue;
+      if(/^data:image\//i.test(src) || /^https?:\/\//i.test(src))out.push(src);
+    }
+  }catch(_){ }
+  return [...new Set(out)];
+}
+async function imageSignatureSources(item,htmlText){
+  const sources=htmlImageHints(htmlText);
+  const atts=Array.from(item.attachments||[]).filter(a=>{
+    const n=String(a.name||"").toLowerCase();
+    return !!a.isInline || /\.(png|jpe?g|gif|webp|bmp)$/i.test(n);
+  }).slice(0,8);
+  for(const a of atts){const d=await attachmentImageDataUrl(item,a);if(d)sources.push(d)}
+  return [...new Set(sources)].slice(0,8);
+}
+function ocrSignatureScore(text,currentName,currentEmail){
+  const t=cleanSignatureText(text||"");if(!t)return -999;
+  let score=t.split("\n").reduce((n,l)=>n+signatureScore(l),0);
+  const nm=cleanName(currentName||"").toLowerCase();
+  if(nm&&t.toLowerCase().includes(nm))score+=8;
+  if(currentEmail&&t.toLowerCase().includes(String(currentEmail).toLowerCase()))score+=7;
+  const ph=phones(t),ad=address(t);
+  if(ph.businessPhone||ph.mobilePhone)score+=5;
+  if(ad.state&&ad.postalCode)score+=6;
+  if(website(t,currentEmail))score+=3;
+  if(t.split("\n").filter(Boolean).length>=4)score+=2;
+  return score;
+}
+async function imageSignatureCandidate(item,htmlText,currentName,currentEmail,myEmail){
+  if(!currentEmail || sameEmail(currentEmail,myEmail))return null;
+  const sources=await imageSignatureSources(item,htmlText);
+  if(!sources.length)return null;
+  status(`No text signature found. Reading ${sources.length} signature image${sources.length===1?"":"s"}…`);
+  const T=await loadTesseract();
+  let worker=null,best=null;
+  try{
+    worker=await T.createWorker("eng");
+    for(let i=0;i<sources.length;i++){
+      status(`Reading signature image ${i+1} of ${sources.length}…`);
+      try{
+        const r=await worker.recognize(sources[i]);
+        const text=cleanSignatureText(r?.data?.text||"");
+        const score=ocrSignatureScore(text,currentName,currentEmail);
+        if(!best||score>best.score)best={score,text};
+      }catch(_){ }
+    }
+  }finally{try{if(worker)await worker.terminate()}catch(_){ }}
+  if(!best || best.score<8 || !best.text)return null;
+  const parsed=parseContactFromSignature(currentName||"Current sender",String(currentEmail||"").toLowerCase(),best.text);
+  parsed.email=String(currentEmail||"").toLowerCase();
+  if(!parsed.countryOrRegion && US_STATES.has(String(parsed.state||"").toUpperCase()))parsed.countryOrRegion="United States";
+  parsed.signature=best.text;
+  parsed.personalNotes=best.text;
+  parsed._debug={source:"Image OCR fallback",htmlSignature:"",textSignature:best.text,ocrScore:best.score};
+  return {name:currentName||[parsed.givenName,parsed.surname].filter(Boolean).join(" "),email:parsed.email,text:best.text,parsed};
+}
+
 function readBody(item){
   return new Promise((resolve,reject)=>{
     item.body.getAsync(Office.CoercionType.Html,r=>{
@@ -724,8 +837,18 @@ async function scan(){try{
     else if(t){t.parsed._debug={source:"Plain text only",htmlSignature:"",textSignature:t.parsed.signature||""};merged.set(key,t)}
   }
   candidates=[...merged.values()];
+  // If there is no text/HTML contact at all, try image OCR for the current sender.
+  // This covers signatures delivered as a single image/business-card graphic.
+  if(!candidates.length){
+    try{
+      const ocr=await imageSignatureCandidate(item,body.html||"",from.displayName||"",from.emailAddress||"",myEmail);
+      if(ocr)candidates=[ocr];
+    }catch(ocrErr){
+      console.warn("Image signature OCR fallback failed",ocrErr);
+    }
+  }
   renderCandidates();
-  status(`Found ${candidates.length} possible contact${candidates.length===1?"":"s"}. Your own messages/signature are ignored. Select the people you want to process.`,"ok")
+  status(`Found ${candidates.length} possible contact${candidates.length===1?"":"s"}. Your own messages/signature are ignored. Select the people you want to process.`,candidates.length?"ok":"error")
 }catch(e){status(e.message||String(e),"error")}}
 
 function clientId(){return localStorage.getItem("ccfe_client_id")||""}
