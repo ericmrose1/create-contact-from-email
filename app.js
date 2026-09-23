@@ -42,19 +42,42 @@ function phoneTokens(sig){
   return c
 }
 function phones(sig){
-  const c=phoneTokens(sig);
+  // First pass: honor explicit labels. This is especially important for OCR, where
+  // a business-card image may contain Office, Direct, Mobile/Cell and Fax on one line.
+  const labeled={office:"",direct:"",mobile:"",fax:""};
+  const labelText=norm(sig).replace(/©/g,"O").replace(/®/g,"O");
+  const labelRx=/(?:^|[|•;\s])\b(office|business|phone|tel|telephone|direct|mobile|cell|fax|o|d|m|c|f)\b\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/gi;
+  for(const line of labelText.split("\n")){
+    labelRx.lastIndex=0; let m;
+    while((m=labelRx.exec(line))){
+      const lab=m[1].toLowerCase();
+      const val=phoneForOutlook(m[2]+(m[3]?` x${m[3]}`:""));
+      if(!val)continue;
+      if(/^(office|business|phone|tel|telephone|o)$/.test(lab) && !labeled.office)labeled.office=val;
+      else if(/^(direct|d)$/.test(lab) && !labeled.direct)labeled.direct=val;
+      else if(/^(mobile|cell|m|c)$/.test(lab) && !labeled.mobile)labeled.mobile=val;
+      else if(/^(fax|f)$/.test(lab) && !labeled.fax)labeled.fax=val;
+    }
+  }
+
+  const c=phoneTokens(labelText);
   const has=(x,rx)=>rx.test((x.before+" "+x.after).trim());
   const mobileRx=/\b(mobile|cell|cellular)\b|(?:^|[|•;\s])\(?\s*(?:m|c)\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
   const faxRx=/\bfax\b|(?:^|[|•;\s])\(?\s*f\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
   const directRx=/\bdirect\b|(?:^|[|•;\s])\(?\s*d\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
   const officeRx=/\b(office|business|phone|tel|telephone)\b|(?:^|[|•;\s])\(?\s*(?:o|p|t)\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
-  const mobile=(c.find(x=>has(x,mobileRx))||{}).value||"";
-  const fax=(c.find(x=>has(x,faxRx))||{}).value||"";
-  const direct=(c.find(x=>has(x,directRx))||{}).value||"";
-  const office=(c.find(x=>has(x,officeRx))||{}).value||"";
+  const mobile=labeled.mobile||((c.find(x=>has(x,mobileRx))||{}).value||"");
+  const fax=labeled.fax||((c.find(x=>has(x,faxRx))||{}).value||"");
+  const direct=labeled.direct||((c.find(x=>has(x,directRx))||{}).value||"");
+  const office=labeled.office||((c.find(x=>has(x,officeRx))||{}).value||"");
   let business=direct||office;
-  if(!business){const u=c.find(x=>x.value!==mobile&&x.value!==fax);business=u?u.value:""}
-  return{businessPhone:phoneForOutlook(business),mobilePhone:phoneForOutlook(mobile),businessFax:phoneForOutlook(fax)}
+  if(!business){const u=c.find(x=>phoneForOutlook(x.value)!==phoneForOutlook(mobile)&&phoneForOutlook(x.value)!==phoneForOutlook(fax));business=u?u.value:""}
+  const result={businessPhone:phoneForOutlook(business),mobilePhone:phoneForOutlook(mobile),businessFax:phoneForOutlook(fax)};
+  // Never duplicate the same OCR number into Office and Mobile. If OCR confused an
+  // O label with C/M, the explicit business label is the safer interpretation.
+  if(result.businessPhone && result.mobilePhone && result.businessPhone===result.mobilePhone)result.mobilePhone="";
+  if(result.businessPhone && result.businessFax && result.businessPhone===result.businessFax && !labeled.fax)result.businessFax="";
+  return result;
 }
 function decodeProofpointUrl(v){
   const raw=String(v||"").trim();
@@ -679,7 +702,7 @@ function mergeParsed(primary,secondary,sourceLabel){
 }
 function diagnosticRows(parsed){
   const vals=[
-    ["Company",parsed.companyName],["Business / direct",parsed.businessPhone],["Mobile",parsed.mobilePhone],
+    ["Company",parsed.companyName],["Job title",parsed.jobTitle],["Business / direct",parsed.businessPhone],["Mobile",parsed.mobilePhone],["Fax",parsed.businessFax],
     ["Street",parsed.street],["City",parsed.city],["State",parsed.state],["ZIP",parsed.postalCode],["Country inferred",parsed.countryOrRegion]
   ];
   return vals.map(([l,v])=>`<div class="diag-row"><b>${html(l)}</b><span>${html(v||"(not detected)")}</span></div>`).join("");
@@ -691,7 +714,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.6.0 — OCR fallback for image-only signatures.
+// v2.6.1 — OCR fallback and image-signature repair.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -760,6 +783,57 @@ async function imageSignatureSources(item,htmlText){
   for(const a of atts){const d=await attachmentImageDataUrl(item,a);if(d)sources.push(d)}
   return [...new Set(sources)].slice(0,8);
 }
+function smartTitleCase(v){
+  const x=String(v||"").trim();
+  if(!x)return"";
+  if(x===x.toUpperCase())return x.toLowerCase().replace(/\b[a-z]/g,c=>c.toUpperCase());
+  return x;
+}
+function ocrJobTitle(text,currentName){
+  const lines=norm(text).split("\n").map(x=>x.trim()).filter(Boolean);
+  const target=cleanName(currentName||"").toLowerCase();
+  let start=0;
+  if(target){const i=lines.findIndex(l=>cleanName(l).toLowerCase()===target||cleanName(l).toLowerCase().startsWith(target+" "));if(i>=0)start=i+1;}
+  for(let i=start;i<Math.min(lines.length,start+5);i++){
+    const line=lines[i];
+    if(cleanEmail(line)||/\d{3}[\s.\-]*\d{3}/.test(line)||/\b\d{5}(?:-\d{4})?\b/.test(line)||/^www\.|https?:/i.test(line))break;
+    const low=line.toLowerCase();
+    if(TITLE_WORDS.some(t=>low.includes(t))&&!COMPANY_WORDS.some(w=>(" "+low).includes(w)))return smartTitleCase(line.replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,""));
+  }
+  return"";
+}
+function repairOcrStateAndCountry(parsed,text){
+  const out={...parsed};
+  let st=String(out.state||"").toUpperCase().trim();
+  const zip=String(out.postalCode||"").trim() || ((norm(text).match(/\b\d{5}(?:-\d{4})?\b/)||[])[0]||"");
+  if(!out.postalCode&&zip)out.postalCode=zip;
+  if(!US_STATES.has(st) && zip){
+    const z=parseInt(zip.slice(0,3),10);
+    // Common OCR confusion for ID -> 10/1D/IO. Idaho ZIP prefixes are 832-838.
+    if(z>=832&&z<=838)st="ID";
+    else {
+      const near=norm(text).match(new RegExp(`[,\\s]+([A-Z0-9]{2})\\s+${zip.replace(/[-]/g,"\\-")}`,'i'));
+      if(near){const tok=near[1].toUpperCase().replace(/^1D$/,"ID").replace(/^I0$/,"ID").replace(/^10$/,"ID");if(US_STATES.has(tok))st=tok;}
+    }
+  }
+  if(st&&US_STATES.has(st))out.state=st;
+  // A recognized US state OR a normal five-digit ZIP is enough to infer country.
+  if(!out.countryOrRegion && (US_STATES.has(String(out.state||"").toUpperCase()) || /^\d{5}(?:-\d{4})?$/.test(zip)))out.countryOrRegion="United States";
+  return out;
+}
+function repairOcrParsed(parsed,text,currentName,currentEmail){
+  let out={...parsed};
+  const exactTitle=ocrJobTitle(text,currentName);
+  if(exactTitle)out.jobTitle=exactTitle;
+  Object.assign(out,phones(text));
+  out=repairOcrStateAndCountry(out,text);
+  // Outlook's From header remains authoritative for the sender identity/email.
+  const np=nameParts(currentName||[out.givenName,out.surname].filter(Boolean).join(" "));
+  if(currentName)Object.assign(out,np);
+  if(currentEmail)out.email=String(currentEmail).toLowerCase();
+  return out;
+}
+
 function ocrSignatureScore(text,currentName,currentEmail){
   const t=cleanSignatureText(text||"");if(!t)return -999;
   let score=t.split("\n").reduce((n,l)=>n+signatureScore(l),0);
@@ -793,9 +867,8 @@ async function imageSignatureCandidate(item,htmlText,currentName,currentEmail,my
     }
   }finally{try{if(worker)await worker.terminate()}catch(_){ }}
   if(!best || best.score<8 || !best.text)return null;
-  const parsed=parseContactFromSignature(currentName||"Current sender",String(currentEmail||"").toLowerCase(),best.text);
-  parsed.email=String(currentEmail||"").toLowerCase();
-  if(!parsed.countryOrRegion && US_STATES.has(String(parsed.state||"").toUpperCase()))parsed.countryOrRegion="United States";
+  let parsed=parseContactFromSignature(currentName||"Current sender",String(currentEmail||"").toLowerCase(),best.text);
+  parsed=repairOcrParsed(parsed,best.text,currentName,currentEmail);
   parsed.signature=best.text;
   parsed.personalNotes=best.text;
   parsed._debug={source:"Image OCR fallback",htmlSignature:"",textSignature:best.text,ocrScore:best.score};
@@ -837,15 +910,26 @@ async function scan(){try{
     else if(t){t.parsed._debug={source:"Plain text only",htmlSignature:"",textSignature:t.parsed.signature||""};merged.set(key,t)}
   }
   candidates=[...merged.values()];
-  // If there is no text/HTML contact at all, try image OCR for the current sender.
-  // This covers signatures delivered as a single image/business-card graphic.
-  if(!candidates.length){
-    try{
+  // Image-only signatures can coexist with quoted text from older messages. In that case
+  // the generic text scanner may create a false current-sender candidate from somebody
+  // else's quoted signature. If the current sender is not actually visible in the selected
+  // text signature, OCR the likely signature image and prefer that result for this sender.
+  try{
+    const currentEmail=String(from.emailAddress||"").toLowerCase();
+    const currentName=cleanName(from.displayName||"");
+    const current=candidates.find(c=>sameEmail(c.email,currentEmail));
+    const sig=String(current?.parsed?.signature||"");
+    const inferred=cleanName(inferPersonName(sig)).toLowerCase();
+    const hasIdentity=!!current && ((currentEmail&&sig.toLowerCase().includes(currentEmail)) || (currentName&&inferred===currentName.toLowerCase()));
+    if(!hasIdentity){
       const ocr=await imageSignatureCandidate(item,body.html||"",from.displayName||"",from.emailAddress||"",myEmail);
-      if(ocr)candidates=[ocr];
-    }catch(ocrErr){
-      console.warn("Image signature OCR fallback failed",ocrErr);
+      if(ocr){
+        candidates=candidates.filter(c=>!sameEmail(c.email,currentEmail));
+        candidates.unshift(ocr);
+      }
     }
+  }catch(ocrErr){
+    console.warn("Image signature OCR fallback failed",ocrErr);
   }
   renderCandidates();
   status(`Found ${candidates.length} possible contact${candidates.length===1?"":"s"}. Your own messages/signature are ignored. Select the people you want to process.`,candidates.length?"ok":"error")
