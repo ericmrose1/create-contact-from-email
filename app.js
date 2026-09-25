@@ -718,12 +718,12 @@ function diagnosticRows(parsed){
 }
 function diagnosticPanel(parsed){
   const d=parsed._debug||{};
-  return `<details class="diagnostic" open><summary>Parser diagnostic — what the add-in actually detected</summary><div class="diag-source">Source used: ${html(d.source||"email signature")}</div>${diagnosticRows(parsed)}<div class="diag-block"><b>Signature text used for Notes</b><pre>${html(parsed.signature||"(none)")}</pre></div>${d.htmlSignature&&d.textSignature&&d.htmlSignature!==d.textSignature?`<div class="diag-block"><b>HTML signature candidate</b><pre>${html(d.htmlSignature)}</pre><b>Plain-text signature candidate</b><pre>${html(d.textSignature)}</pre></div>`:""}</details>`;
+  return `<details class="diagnostic"><summary>Show diagnostic</summary><div class="diag-source">Source used: ${html(d.source||"email signature")}</div>${diagnosticRows(parsed)}<div class="diag-block"><b>Signature text used for Notes</b><pre>${html(parsed.signature||"(none)")}</pre></div>${d.htmlSignature&&d.textSignature&&d.htmlSignature!==d.textSignature?`<div class="diag-block"><b>HTML signature candidate</b><pre>${html(d.htmlSignature)}</pre><b>Plain-text signature candidate</b><pre>${html(d.textSignature)}</pre></div>`:""}</details>`;
 }
 
 
 
-// v2.6.3 — stricter image-signature OCR classification.
+// v2.6.4 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -1086,38 +1086,4 @@ async function compareSelected(){try{const selected=[...document.querySelectorAl
 Office.onReady(async info=>{if(info.host!==Office.HostType.Outlook){status("This page must be opened from the Outlook add-in.","error");return}showAuthSetup();$("saveClientId").addEventListener("click",()=>{const id=$("clientId").value.trim();if(!/^[0-9a-f-]{36}$/i.test(id)){status("That does not look like a Microsoft Application (client) ID.","error");return}localStorage.setItem("ccfe_client_id",id);msalInstance=null;showAuthSetup();status("Client ID saved. You can now compare contacts.","ok")});$("selectAll").addEventListener("click",()=>document.querySelectorAll("input[data-candidate]").forEach(x=>x.checked=true));$("selectNone").addEventListener("click",()=>document.querySelectorAll("input[data-candidate]").forEach(x=>x.checked=false));$("scanAgain").addEventListener("click",scan);$("compareSelected").addEventListener("click",compareSelected);await scan()});
 
 
-function collapseParserDiagnostic(){
-  try{
-    const candidates=[
-      document.getElementById("parserDiagnostic"),
-      document.querySelector(".parser-diagnostic"),
-      ...Array.from(document.querySelectorAll("details,div,section")).filter(el=>/parser diagnostic/i.test(el.textContent||""))
-    ].filter(Boolean);
-    const panel=candidates[0];
-    if(!panel)return;
-    if(panel.tagName==="DETAILS"){ panel.open=false; return; }
-    panel.classList.add("diagnostic-panel");
-    panel.classList.remove("open");
-    if(!document.getElementById("toggleParserDiagnostic")){
-      const b=document.createElement("button");
-      b.type="button"; b.id="toggleParserDiagnostic"; b.className="diagnostic-toggle"; b.textContent="Show diagnostic";
-      b.addEventListener("click",()=>{
-        const open=panel.classList.toggle("open");
-        b.textContent=open?"Hide diagnostic":"Show diagnostic";
-      });
-      panel.parentNode.insertBefore(b,panel);
-    }
-  }catch(_){}
-}
-document.addEventListener("click",(e)=>{
-  if(e.target && e.target.id==="toggleParserDiagnostic"){
-    const panel=document.getElementById("parserDiagnostic")||document.querySelector(".parser-diagnostic,.diagnostic-panel");
-    if(panel && panel.tagName!=="DETAILS"){
-      const open=panel.classList.toggle("open");
-      e.target.textContent=open?"Hide diagnostic":"Show diagnostic";
-    }
-  }
-});
 
-
-setInterval(collapseParserDiagnostic, 500);
