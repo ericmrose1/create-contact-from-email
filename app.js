@@ -1,12 +1,12 @@
 import { createNestablePublicClientApplication, InteractionRequiredAuthError } from "https://cdn.jsdelivr.net/npm/@azure/msal-browser@5.1.0/+esm";
 
 const GRAPH_SCOPES=["Contacts.ReadWrite"];
-const TITLE_WORDS=["project executive","senior project manager","project manager","assistant project manager","project engineer","project coordinator","construction manager","assistant general manager","general manager","superintendent","estimator","vice president","president","principal","partner","associate","director","manager","architect","engineer","designer","consultant","owner","coordinator"];
+const TITLE_WORDS=["sales representative ii","sales representative","sales rep","project executive","senior project manager","project manager","assistant project manager","project engineer","project coordinator","construction manager","assistant general manager","general manager","superintendent","estimator","vice president","president","principal","partner","associate","director","manager","architect","engineer","designer","consultant","owner","coordinator"];
 const COMPANY_WORDS=[" llc"," l.l.c"," inc"," corp"," company"," co."," construction"," builders"," building"," architecture"," architects"," engineering"," engineers"," associates"," group"," studio"," mechanical"," electric"," electrical"," plumbing"," design"," contractors"," contractor"," concrete"," masonry"," garage"," workshop"," services"," solutions"," systems"," enterprises"," partners"];
 const CREDENTIALS=new Set(["AIA","PE","P.E.","RA","R.A.","LEED","PMP","NCARB","FAIA","SE","S.E."]);
 const FIELD_META={
   givenName:"First name",middleName:"Middle name",surname:"Last name",companyName:"Company",jobTitle:"Job title",email:"Email",
-  businessPhone:"Business / direct",mobilePhone:"Mobile",businessFax:"Fax",businessHomePage:"Website",street:"Street",city:"City",state:"State",postalCode:"ZIP",countryOrRegion:"Country",personalNotes:"Notes"
+  businessPhone:"Business / Office",mobilePhone:"Mobile",businessFax:"Fax",businessHomePage:"Website",street:"Street",city:"City",state:"State",postalCode:"ZIP",countryOrRegion:"Country",personalNotes:"Notes"
 };
 let candidates=[]; let graphContacts=[]; let msalInstance=null;
 
@@ -42,10 +42,22 @@ function phoneTokens(sig){
   return c
 }
 function phones(sig){
-  // First pass: honor explicit labels. This is especially important for OCR, where
-  // a business-card image may contain Office, Direct, Mobile/Cell and Fax on one line.
-  const labeled={office:"",direct:"",mobile:"",fax:""};
+  // Honor explicit labels first.
+  // Important convention: "Direct/Text" is a mobile-capable number and belongs in Mobile.
+  // A plain "Direct" number remains a business number unless an Office number is also supplied.
+  const labeled={office:"",direct:"",directText:"",mobile:"",fax:""};
   const labelText=norm(sig).replace(/©/g,"O").replace(/®/g,"O");
+
+  // Special case: Direct/Text, Direct & Text, Direct-Text, etc.
+  const dtRx=/(?:^|[|•;\s])\b(?:direct\s*[/&+\-]\s*text|direct\s+text|text\s*[/&+\-]\s*direct)\b\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/gi;
+  for(const line of labelText.split("\n")){
+    dtRx.lastIndex=0; let m;
+    while((m=dtRx.exec(line))){
+      const val=phoneForOutlook(m[1]+(m[2]?` x${m[2]}`:""));
+      if(val&&!labeled.directText)labeled.directText=val;
+    }
+  }
+
   const labelRx=/(?:^|[|•;\s])\b(office|business|phone|tel|telephone|direct|mobile|cell|fax|o|d|m|c|f)\b\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/gi;
   for(const line of labelText.split("\n")){
     labelRx.lastIndex=0; let m;
@@ -53,8 +65,13 @@ function phones(sig){
       const lab=m[1].toLowerCase();
       const val=phoneForOutlook(m[2]+(m[3]?` x${m[3]}`:""));
       if(!val)continue;
+
+      // Do not reclassify the Direct portion of a Direct/Text label as business.
+      const near=line.slice(Math.max(0,m.index-2), Math.min(line.length, labelRx.lastIndex+8));
+      const isDirectText=/direct\s*(?:[/&+\-]\s*)?text|text\s*(?:[/&+\-]\s*)?direct/i.test(near);
+
       if(/^(office|business|phone|tel|telephone|o)$/.test(lab) && !labeled.office)labeled.office=val;
-      else if(/^(direct|d)$/.test(lab) && !labeled.direct)labeled.direct=val;
+      else if(/^(direct|d)$/.test(lab) && !isDirectText && !labeled.direct)labeled.direct=val;
       else if(/^(mobile|cell|m|c)$/.test(lab) && !labeled.mobile)labeled.mobile=val;
       else if(/^(fax|f)$/.test(lab) && !labeled.fax)labeled.fax=val;
     }
@@ -66,15 +83,28 @@ function phones(sig){
   const faxRx=/\bfax\b|(?:^|[|•;\s])\(?\s*f\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
   const directRx=/\bdirect\b|(?:^|[|•;\s])\(?\s*d\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
   const officeRx=/\b(office|business|phone|tel|telephone)\b|(?:^|[|•;\s])\(?\s*(?:o|p|t)\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
-  const mobile=labeled.mobile||((c.find(x=>has(x,mobileRx))||{}).value||"");
+
+  let mobile=labeled.directText||labeled.mobile||((c.find(x=>has(x,mobileRx))||{}).value||"");
   const fax=labeled.fax||((c.find(x=>has(x,faxRx))||{}).value||"");
   const direct=labeled.direct||((c.find(x=>has(x,directRx))||{}).value||"");
   const office=labeled.office||((c.find(x=>has(x,officeRx))||{}).value||"");
-  let business=direct||office;
-  if(!business){const u=c.find(x=>phoneForOutlook(x.value)!==phoneForOutlook(mobile)&&phoneForOutlook(x.value)!==phoneForOutlook(fax));business=u?u.value:""}
-  const result={businessPhone:phoneForOutlook(business),mobilePhone:phoneForOutlook(mobile),businessFax:phoneForOutlook(fax)};
-  // Never duplicate the same OCR number into Office and Mobile. If OCR confused an
-  // O label with C/M, the explicit business label is the safer interpretation.
+
+  // Office is the preferred Outlook Business number.
+  // Use plain Direct only when no Office number exists.
+  let business=office||direct;
+  if(!business){
+    const u=c.find(x=>{
+      const v=phoneForOutlook(x.value);
+      return v!==phoneForOutlook(mobile)&&v!==phoneForOutlook(fax);
+    });
+    business=u?u.value:"";
+  }
+
+  const result={
+    businessPhone:phoneForOutlook(business),
+    mobilePhone:phoneForOutlook(mobile),
+    businessFax:phoneForOutlook(fax)
+  };
   if(result.businessPhone && result.mobilePhone && result.businessPhone===result.mobilePhone)result.mobilePhone="";
   if(result.businessPhone && result.businessFax && result.businessPhone===result.businessFax && !labeled.fax)result.businessFax="";
   return result;
@@ -711,7 +741,7 @@ function mergeParsed(primary,secondary,sourceLabel){
 }
 function diagnosticRows(parsed){
   const vals=[
-    ["Company",parsed.companyName],["Job title",parsed.jobTitle],["Business / direct",parsed.businessPhone],["Mobile",parsed.mobilePhone],["Fax",parsed.businessFax],
+    ["Company",parsed.companyName],["Job title",parsed.jobTitle],["Business / Office",parsed.businessPhone],["Mobile",parsed.mobilePhone],["Fax",parsed.businessFax],
     ["Street",parsed.street],["City",parsed.city],["State",parsed.state],["ZIP",parsed.postalCode],["Country inferred",parsed.countryOrRegion]
   ];
   return vals.map(([l,v])=>`<div class="diag-row"><b>${html(l)}</b><span>${html(v||"(not detected)")}</span></div>`).join("");
@@ -723,7 +753,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.6.4 — stricter image-signature OCR classification.
+// v2.6.5 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -815,21 +845,32 @@ function ocrJobTitle(text,currentName){
 function strictOcrPhones(text){
   const raw=norm(text).replace(/©/g,"O").replace(/®/g,"O");
   const out={businessPhone:"",mobilePhone:"",businessFax:""};
-  const patterns=[
-    ["businessPhone",/(?:^|[\n|•;\s])(?:office|business|phone|tel|telephone|O|0)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im],
-    ["mobilePhone",/(?:^|[\n|•;\s])(?:mobile|cell|cellular|M|C)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im],
-    ["businessFax",/(?:^|[\n|•;\s])(?:fax|F)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im]
-  ];
-  for(const [key,rx] of patterns){
-    const m=raw.match(rx);
-    if(m)out[key]=phoneForOutlook(m[1]+(m[2]?` x${m[2]}`:""));
+
+  const directText=raw.match(/(?:^|[\n|•;\s])(?:direct\s*[/&+\-]\s*text|direct\s+text|text\s*[/&+\-]\s*direct)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+  if(directText)out.mobilePhone=phoneForOutlook(directText[1]+(directText[2]?` x${directText[2]}`:""));
+
+  const office=raw.match(/(?:^|[\n|•;\s])(?:office|business|phone|tel|telephone|O|0)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+  if(office)out.businessPhone=phoneForOutlook(office[1]+(office[2]?` x${office[2]}`:""));
+
+  if(!out.mobilePhone){
+    const mobile=raw.match(/(?:^|[\n|•;\s])(?:mobile|cell|cellular|M|C)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+    if(mobile)out.mobilePhone=phoneForOutlook(mobile[1]+(mobile[2]?` x${mobile[2]}`:""));
   }
-  // OCR sometimes drops the leading O label but still reads a single phone + extension.
-  // In that narrow case, use it as Business/Office only. Never invent Mobile or Fax.
+
   if(!out.businessPhone){
+    const direct=raw.match(/(?:^|[\n|•;\s])(?:direct|D)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+    if(direct)out.businessPhone=phoneForOutlook(direct[1]+(direct[2]?` x${direct[2]}`:""));
+  }
+
+  const fax=raw.match(/(?:^|[\n|•;\s])(?:fax|F)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+  if(fax)out.businessFax=phoneForOutlook(fax[1]+(fax[2]?` x${fax[2]}`:""));
+
+  // If there is just one truly unlabeled number, it can be Business/Office.
+  if(!out.businessPhone && !out.mobilePhone){
     const matches=[...raw.matchAll(/((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/gi)];
     if(matches.length===1)out.businessPhone=phoneForOutlook(matches[0][1]+(matches[0][2]?` x${matches[0][2]}`:""));
   }
+
   if(out.businessPhone===out.mobilePhone)out.mobilePhone="";
   if(out.businessPhone===out.businessFax)out.businessFax="";
   return out;
