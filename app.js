@@ -42,72 +42,57 @@ function phoneTokens(sig){
   return c
 }
 function phones(sig){
-  // Honor explicit labels first.
-  // Important convention: "Direct/Text" is a mobile-capable number and belongs in Mobile.
-  // A plain "Direct" number remains a business number unless an Office number is also supplied.
-  const labeled={office:"",direct:"",directText:"",mobile:"",fax:""};
-  const labelText=norm(sig).replace(/©/g,"O").replace(/®/g,"O");
+  // Phone-label rules:
+  // Office -> Business
+  // Direct/Text -> Mobile
+  // Direct without extension -> Mobile
+  // Direct with extension -> Business/Direct
+  // Mobile/Cell -> Mobile
+  // Fax -> Fax
+  const text=norm(sig).replace(/©/g,"O").replace(/®/g,"O");
+  const out={businessPhone:"",mobilePhone:"",businessFax:""};
 
-  // Special case: Direct/Text, Direct & Text, Direct-Text, etc.
-  const dtRx=/(?:^|[|•;\s])\b(?:direct\s*[/&+\-]\s*text|direct\s+text|text\s*[/&+\-]\s*direct)\b\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/gi;
-  for(const line of labelText.split("\n")){
-    dtRx.lastIndex=0; let m;
-    while((m=dtRx.exec(line))){
-      const val=phoneForOutlook(m[1]+(m[2]?` x${m[2]}`:""));
-      if(val&&!labeled.directText)labeled.directText=val;
+  function fmt(num,ext){return phoneForOutlook(num+(ext?` x${ext}`:""));}
+
+  // Direct/Text is always mobile-capable.
+  const dt=text.match(/(?:^|[\n|•;\s])(?:direct\s*[/&+\-]\s*text|direct\s+text|text\s*[/&+\-]\s*direct)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+  if(dt)out.mobilePhone=fmt(dt[1],dt[2]);
+
+  // Office/business line.
+  const office=text.match(/(?:^|[\n|•;\s])(?:office|business|phone|tel|telephone|O)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+  if(office)out.businessPhone=fmt(office[1],office[2]);
+
+  // Direct: extension means a business direct line; no extension means mobile.
+  const direct=text.match(/(?:^|[\n|•;\s])(?:direct|D)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+  if(direct){
+    const val=fmt(direct[1],direct[2]);
+    if(direct[2]){
+      // Personal business direct line takes precedence over a general office number.
+      out.businessPhone=val;
+    }else if(!out.mobilePhone){
+      out.mobilePhone=val;
     }
   }
 
-  const labelRx=/(?:^|[|•;\s])\b(office|business|phone|tel|telephone|direct|mobile|cell|fax|o|d|m|c|f)\b\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/gi;
-  for(const line of labelText.split("\n")){
-    labelRx.lastIndex=0; let m;
-    while((m=labelRx.exec(line))){
-      const lab=m[1].toLowerCase();
-      const val=phoneForOutlook(m[2]+(m[3]?` x${m[3]}`:""));
-      if(!val)continue;
-
-      // Do not reclassify the Direct portion of a Direct/Text label as business.
-      const near=line.slice(Math.max(0,m.index-2), Math.min(line.length, labelRx.lastIndex+8));
-      const isDirectText=/direct\s*(?:[/&+\-]\s*)?text|text\s*(?:[/&+\-]\s*)?direct/i.test(near);
-
-      if(/^(office|business|phone|tel|telephone|o)$/.test(lab) && !labeled.office)labeled.office=val;
-      else if(/^(direct|d)$/.test(lab) && !isDirectText && !labeled.direct)labeled.direct=val;
-      else if(/^(mobile|cell|m|c)$/.test(lab) && !labeled.mobile)labeled.mobile=val;
-      else if(/^(fax|f)$/.test(lab) && !labeled.fax)labeled.fax=val;
-    }
+  // Explicit mobile/cell label.
+  if(!out.mobilePhone){
+    const mobile=text.match(/(?:^|[\n|•;\s])(?:mobile|cell|cellular|M|C)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+    if(mobile)out.mobilePhone=fmt(mobile[1],mobile[2]);
   }
 
-  const c=phoneTokens(labelText);
-  const has=(x,rx)=>rx.test((x.before+" "+x.after).trim());
-  const mobileRx=/\b(mobile|cell|cellular)\b|(?:^|[|•;\s])\(?\s*(?:m|c)\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
-  const faxRx=/\bfax\b|(?:^|[|•;\s])\(?\s*f\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
-  const directRx=/\bdirect\b|(?:^|[|•;\s])\(?\s*d\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
-  const officeRx=/\b(office|business|phone|tel|telephone)\b|(?:^|[|•;\s])\(?\s*(?:o|p|t)\s*\)?\s*[:.\-]?\s*(?:$|[|•;])/i;
+  const fax=text.match(/(?:^|[\n|•;\s])(?:fax|F)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+  if(fax)out.businessFax=fmt(fax[1],fax[2]);
 
-  let mobile=labeled.directText||labeled.mobile||((c.find(x=>has(x,mobileRx))||{}).value||"");
-  const fax=labeled.fax||((c.find(x=>has(x,faxRx))||{}).value||"");
-  const direct=labeled.direct||((c.find(x=>has(x,directRx))||{}).value||"");
-  const office=labeled.office||((c.find(x=>has(x,officeRx))||{}).value||"");
-
-  // Office is the preferred Outlook Business number.
-  // Use plain Direct only when no Office number exists.
-  let business=office||direct;
-  if(!business){
-    const u=c.find(x=>{
-      const v=phoneForOutlook(x.value);
-      return v!==phoneForOutlook(mobile)&&v!==phoneForOutlook(fax);
-    });
-    business=u?u.value:"";
+  // Conservative fallback for an unlabeled number only when no labeled phone was found.
+  if(!out.businessPhone && !out.mobilePhone){
+    const vals=phoneTokens(text).map(x=>phoneForOutlook(x.value)).filter(Boolean);
+    const unique=[...new Set(vals)];
+    if(unique.length===1)out.businessPhone=unique[0];
   }
 
-  const result={
-    businessPhone:phoneForOutlook(business),
-    mobilePhone:phoneForOutlook(mobile),
-    businessFax:phoneForOutlook(fax)
-  };
-  if(result.businessPhone && result.mobilePhone && result.businessPhone===result.mobilePhone)result.mobilePhone="";
-  if(result.businessPhone && result.businessFax && result.businessPhone===result.businessFax && !labeled.fax)result.businessFax="";
-  return result;
+  if(out.businessPhone===out.mobilePhone)out.mobilePhone="";
+  if(out.businessPhone===out.businessFax)out.businessFax="";
+  return out;
 }
 function decodeProofpointUrl(v){
   const raw=String(v||"").trim();
@@ -753,7 +738,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.6.5 — stricter image-signature OCR classification.
+// v2.6.6 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -845,30 +830,32 @@ function ocrJobTitle(text,currentName){
 function strictOcrPhones(text){
   const raw=norm(text).replace(/©/g,"O").replace(/®/g,"O");
   const out={businessPhone:"",mobilePhone:"",businessFax:""};
+  function fmt(num,ext){return phoneForOutlook(num+(ext?` x${ext}`:""));}
 
-  const directText=raw.match(/(?:^|[\n|•;\s])(?:direct\s*[/&+\-]\s*text|direct\s+text|text\s*[/&+\-]\s*direct)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
-  if(directText)out.mobilePhone=phoneForOutlook(directText[1]+(directText[2]?` x${directText[2]}`:""));
+  const dt=raw.match(/(?:^|[\n|•;\s])(?:direct\s*[/&+\-]\s*text|direct\s+text|text\s*[/&+\-]\s*direct)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+  if(dt)out.mobilePhone=fmt(dt[1],dt[2]);
 
   const office=raw.match(/(?:^|[\n|•;\s])(?:office|business|phone|tel|telephone|O|0)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
-  if(office)out.businessPhone=phoneForOutlook(office[1]+(office[2]?` x${office[2]}`:""));
+  if(office)out.businessPhone=fmt(office[1],office[2]);
+
+  const direct=raw.match(/(?:^|[\n|•;\s])(?:direct|D)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
+  if(direct){
+    const val=fmt(direct[1],direct[2]);
+    if(direct[2])out.businessPhone=val;
+    else if(!out.mobilePhone)out.mobilePhone=val;
+  }
 
   if(!out.mobilePhone){
     const mobile=raw.match(/(?:^|[\n|•;\s])(?:mobile|cell|cellular|M|C)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
-    if(mobile)out.mobilePhone=phoneForOutlook(mobile[1]+(mobile[2]?` x${mobile[2]}`:""));
-  }
-
-  if(!out.businessPhone){
-    const direct=raw.match(/(?:^|[\n|•;\s])(?:direct|D)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
-    if(direct)out.businessPhone=phoneForOutlook(direct[1]+(direct[2]?` x${direct[2]}`:""));
+    if(mobile)out.mobilePhone=fmt(mobile[1],mobile[2]);
   }
 
   const fax=raw.match(/(?:^|[\n|•;\s])(?:fax|F)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
-  if(fax)out.businessFax=phoneForOutlook(fax[1]+(fax[2]?` x${fax[2]}`:""));
+  if(fax)out.businessFax=fmt(fax[1],fax[2]);
 
-  // If there is just one truly unlabeled number, it can be Business/Office.
   if(!out.businessPhone && !out.mobilePhone){
     const matches=[...raw.matchAll(/((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/gi)];
-    if(matches.length===1)out.businessPhone=phoneForOutlook(matches[0][1]+(matches[0][2]?` x${matches[0][2]}`:""));
+    if(matches.length===1)out.businessPhone=fmt(matches[0][1],matches[0][2]);
   }
 
   if(out.businessPhone===out.mobilePhone)out.mobilePhone="";
@@ -1104,7 +1091,7 @@ function graphPayload(p,keys=null,existing=null){const use=k=>!keys||keys.has(k)
   return o}
 function editableFields(p,idx,existing=null){
   return `<div class="grid">${Object.entries(FIELD_META).map(([k,l])=>{
-    const initial=(p[k]||(!p[k]&&existing?existing[k]:"")||"");
+    const initial=(p[k]||"");
     if(k==="personalNotes")return `<div class="field full notes-field"><div class="notes-label-row"><label>${html(l)} <span class="muted">— editable before saving</span></label><div class="notes-actions"><button type="button" class="mini-btn" data-notes-action="clear" data-index="${idx}">Clear Notes</button><button type="button" class="mini-btn" data-notes-action="restore" data-index="${idx}">Restore Signature</button></div></div><textarea data-review="${idx}" data-field="${k}" spellcheck="true" aria-label="Editable Notes">${html(initial)}</textarea><div class="muted notes-help">Delete, shorten, or rewrite this text. Outlook will receive exactly what remains in this box.</div></div>`;
     return `<div class="field ${["email","street"].includes(k)?"full":""}"><label>${html(l)}</label><input data-review="${idx}" data-field="${k}" value="${html(initial)}"></div>`
   }).join("")}</div>`
@@ -1118,7 +1105,36 @@ function comparisonRows(parsed,existing){
     return `<div class="compare-row ${cls}"><div class="compare-label">${html(label)}</div><div><span class="compare-head">Existing Outlook</span><div>${html(ov||"(blank)")}</div></div><div><span class="compare-head">From email</span><div>${html(nv||"(not found)")}</div></div><div class="compare-state">${html(state)}</div></div>`
   }).join("")
 }
-function renderReviews(items){const box=$("reviews");box.innerHTML="";items.forEach((it,idx)=>{const p=it.parsed,m=it.match,existing=m?existingFlat(m.contact):null,diffs=existing?fieldDiffs(p,existing):[];const el=document.createElement("div");el.className="review";el.dataset.reviewCard=idx;const badge=m?`<span class="badge existing">Existing contact — ${html(m.confidence)}</span>`:`<span class="badge">New contact</span>`;const existingSummary=m?`<div class="existing-panel"><b>Existing Outlook contact data</b>${existing._addressType?`<div class="muted">Address currently stored by Outlook as ${html(existing._addressType)} Address.</div>`:""}<div class="compare-table">${comparisonRows(p,existing)}</div></div>`:"";el.innerHTML=`${badge}<div class="candidate-name" style="margin-top:6px">${html([p.givenName,p.middleName,p.surname].filter(Boolean).join(" ")||it.name)}</div><div class="muted">${html(p.email||it.email||"")}</div><div class="signature-sticky"><div class="sig-title">Signature block from email</div><pre>${html(p.signature||"No signature block confidently found")}</pre></div>${diagnosticPanel(p)}${existingSummary}${editableFields(p,idx,existing)}${m?`<div class="diffs"><b>Fields available to update</b>${diffs.length?diffs.map(d=>`<label class="diff"><input type="checkbox" data-diff="${idx}" data-key="${d.key}" ${d.defaultChecked?"checked":""}><span>${html(d.label)}</span><span class="vals"><span class="old">Existing: ${html(d.old||"(blank)")}</span><br><span class="new">From email: ${html(d.new)}</span></span></label>`).join(""):"<div class=\"muted\">The email did not provide any new or different nonblank values. Existing Outlook data is shown above and will not be erased.</div>"}</div><div class="toolbar"><button class="btn primary" data-action="update" data-index="${idx}" ${diffs.length?"":"disabled"}>Update Existing Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`:`<div class="toolbar"><button class="btn primary" data-action="create" data-index="${idx}">Create Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`}`;box.appendChild(el)});$("reviewSection").hidden=false;box.querySelectorAll("button[data-action]").forEach(b=>b.addEventListener("click",handleAction));box.querySelectorAll("button[data-notes-action]").forEach(b=>b.addEventListener("click",e=>{const idx=Number(e.currentTarget.dataset.index);const ta=document.querySelector(`textarea[data-review="${idx}"][data-field="personalNotes"]`);if(!ta)return;if(e.currentTarget.dataset.notesAction==="clear")ta.value="";else ta.value=(window.__reviewItems[idx]?.parsed?.signature||"");ta.focus();}));}
+function renderReviews(items){
+  const box=$("reviews");box.innerHTML="";
+  items.forEach((it,idx)=>{
+    const p=it.parsed,m=it.match,existing=m?existingFlat(m.contact):null,diffs=existing?fieldDiffs(p,existing):[];
+    const el=document.createElement("div");el.className="review";el.dataset.reviewCard=idx;
+    const badge=m?`<span class="badge existing">Existing contact — ${html(m.confidence)}</span>`:`<span class="badge">New contact</span>`;
+
+    let actionArea="";
+    if(m && diffs.length){
+      actionArea=`<div class="diffs"><b>Choose fields to update</b>${diffs.map(d=>`<label class="diff"><input type="checkbox" data-diff="${idx}" data-key="${d.key}" ${d.defaultChecked?"checked":""}><span>${html(d.label)}</span><span class="vals"><span class="old">Existing: ${html(d.old||"(blank)")}</span><br><span class="new">From email: ${html(d.new)}</span></span></label>`).join("")}</div><div class="toolbar"><button class="btn primary" data-action="update" data-index="${idx}">Update Existing Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`;
+    }else if(m){
+      actionArea=`<div class="toolbar"><span class="muted">No different nonblank fields were found to update.</span><button class="btn" data-action="skip" data-index="${idx}">Done</button></div>`;
+    }else{
+      actionArea=`<div class="toolbar"><button class="btn primary" data-action="create" data-index="${idx}">Create Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`;
+    }
+
+    el.innerHTML=`${badge}<div class="candidate-name" style="margin-top:6px">${html([p.givenName,p.middleName,p.surname].filter(Boolean).join(" ")||it.name)}</div><div class="muted">${html(p.email||it.email||"")}</div><div class="signature-sticky"><div class="sig-title">Signature block from email</div><pre>${html(p.signature||"No signature block confidently found")}</pre></div>${diagnosticPanel(p)}${editableFields(p,idx,null)}${actionArea}`;
+    box.appendChild(el);
+  });
+  $("reviewSection").hidden=false;
+  box.querySelectorAll("button[data-action]").forEach(b=>b.addEventListener("click",handleAction));
+  box.querySelectorAll("button[data-notes-action]").forEach(b=>b.addEventListener("click",e=>{
+    const idx=Number(e.currentTarget.dataset.index);
+    const ta=document.querySelector(`textarea[data-review="${idx}"][data-field="personalNotes"]`);
+    if(!ta)return;
+    if(e.currentTarget.dataset.notesAction==="clear")ta.value="";
+    else ta.value=(window.__reviewItems[idx]?.parsed?.signature||"");
+    ta.focus();
+  }));
+}
 function currentParsed(idx){const d={};document.querySelectorAll(`[data-review="${idx}"][data-field]`).forEach(i=>d[i.dataset.field]=i.value.trim());d.businessPhone=phoneForOutlook(d.businessPhone);d.mobilePhone=phoneForOutlook(d.mobilePhone);d.businessFax=phoneForOutlook(d.businessFax);return d}
 function finishCard(idx,label){const c=document.querySelector(`[data-review-card="${idx}"]`);c.classList.add("done");c.querySelectorAll("button").forEach(b=>b.disabled=true);const span=document.createElement("span");span.className="badge done";span.textContent=label;c.prepend(span)}
 async function handleAction(ev){const action=ev.currentTarget.dataset.action,idx=Number(ev.currentTarget.dataset.index),item=window.__reviewItems[idx];if(action==="skip"){finishCard(idx,"Skipped");return}try{ev.currentTarget.disabled=true;status(action==="create"?"Creating Outlook contact…":"Updating Outlook contact…");const p=currentParsed(idx);if(action==="create"){await graph("/me/contacts",{method:"POST",body:JSON.stringify(graphPayload(p))});finishCard(idx,"Created");status("Contact created in Outlook Contacts.","ok")}else{const selected=new Set([...document.querySelectorAll(`input[data-diff="${idx}"]:checked`)].map(x=>x.dataset.key));if(!selected.size)throw new Error("Check at least one field to update.");await graph(`/me/contacts/${encodeURIComponent(item.match.contact.id)}`,{method:"PATCH",body:JSON.stringify(graphPayload(p,selected,existingFlat(item.match.contact)))});finishCard(idx,"Updated");status("Existing Outlook contact updated.","ok")}}catch(e){ev.currentTarget.disabled=false;status(e.message||String(e),"error")}}
