@@ -154,14 +154,32 @@ function title(sig,personName=""){
   }
   return"";
 }
+
+function isClosingPhrase(line){
+  const v=String(line||"").toLowerCase().replace(/[.,!;:]+$/g,"").replace(/\s+/g," ").trim();
+  if(!v)return false;
+  const exact=new Set([
+    "thank you","thanks","many thanks","thank you very much",
+    "best","best regards","kind regards","warm regards","regards",
+    "sincerely","respectfully","cheers","all the best",
+    "with appreciation","thank you again"
+  ]);
+  return exact.has(v)||/^thanks?\s+(?:again|very much)$/i.test(v);
+}
+function trimLeadingClosings(text){
+  const lines=norm(text).split("\n");
+  while(lines.length && (!lines[0].trim() || isClosingPhrase(lines[0])))lines.shift();
+  return cleanSignatureText(lines.join("\n"));
+}
+
 function looksLikePersonName(line){
   const v=(line||"").trim();if(!v||v.length<4||v.length>55)return false;
+  if(isClosingPhrase(v))return false;
   if(cleanEmail(v)||/\d|https?:|www\.|@|\b(?:street|st\.?|road|rd\.?|ave\.?|avenue|blvd\.?|boulevard|suite|ste\.?|drive|dr\.?|lane|ln\.?|city|inc\.?|llc|corp\.?|company|garage|workshop)\b/i.test(v))return false;
   const low=v.toLowerCase();if(TITLE_WORDS.some(t=>low.includes(t))||COMPANY_WORDS.some(w=>(" "+low).includes(w)))return false;
   const words=v.replace(/[,]/g," ").split(/\s+/).filter(Boolean);if(words.length<2||words.length>5)return false;
   return words.every(w=>/^[A-Za-z][A-Za-z'.-]*$/.test(w));
 }
-
 function splitNameTitleLine(line){
   const raw=String(line||"").trim();
   if(!raw)return null;
@@ -188,6 +206,9 @@ function personNameFromLine(line){
 function inferPersonName(sig){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
   for(let i=0;i<Math.min(lines.length,12);i++){
+    if(isClosingPhrase(lines[i]))continue;
+    const split=splitNameTitleLine(lines[i]);
+    if(split&&split.name)return split.name;
     const found=personNameFromLine(lines[i]);
     if(found){
       const next=(lines[i+1]||"").toLowerCase();
@@ -367,7 +388,7 @@ function isolateSignature(segmentText,senderEmail){
       if(localAnchor<0)localAnchor=chunk.length-1;
       let nameAt=-1;
       for(let j=localAnchor-1;j>=Math.max(0,localAnchor-8);j--){
-        if(personNameFromLine(chunk[j])){nameAt=j;break}
+        if(!isClosingPhrase(chunk[j])&&personNameFromLine(chunk[j])){nameAt=j;break}
       }
       if(nameAt>=0)chunk=chunk.slice(nameAt);
       else{
@@ -405,14 +426,13 @@ function parseContact(senderName,senderEmail,segmentText){
 }
 
 function parseContactFromSignature(senderName,senderEmail,signatureText){
-  const sig=cleanSignatureText(signatureText);
+  const sig=trimLeadingClosings(signatureText);
   const inferred=inferPersonName(sig);
-  const senderLooksHuman=looksLikePersonName(senderName||"");
-  const resolvedName=senderLooksHuman?senderName:(inferred||senderName||"");
+  const senderLooksHuman=looksLikePersonName(senderName||"")&&!isClosingPhrase(senderName||"");
+  const resolvedName=senderLooksHuman?senderName:(inferred||"");
   const site=website(sig,senderEmail);
   return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig,resolvedName),email:senderEmail||""},phones(sig),{businessHomePage:site},address(sig),{signature:sig,personalNotes:sig});
 }
-
 function sameEmail(a,b){return cleanEmail(a)&&cleanEmail(a)===cleanEmail(b)}
 function cleanSignatureText(sig){
   return norm(sig).split("\n").map(x=>x.trim()).filter(Boolean).filter(line=>{
@@ -541,7 +561,7 @@ function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
     let emailLocal=chunk.findIndex(l=>cleanEmail(l)===email);
     if(emailLocal<0)emailLocal=chunk.length-1;
     let nameLocal=-1;
-    for(let j=emailLocal-1;j>=Math.max(0,emailLocal-8);j--){if(personNameFromLine(chunk[j])){nameLocal=j;break}}
+    for(let j=emailLocal-1;j>=Math.max(0,emailLocal-8);j--){if(!isClosingPhrase(chunk[j])&&personNameFromLine(chunk[j])){nameLocal=j;break}}
     if(nameLocal>=0)chunk=chunk.slice(nameLocal);
     else{
       while(chunk.length>5 && signatureScore(chunk[0])===0)chunk.shift();
@@ -809,7 +829,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.6.8 — stricter image-signature OCR classification.
+// v2.6.9 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
