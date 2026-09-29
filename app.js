@@ -201,9 +201,75 @@ function headerIdentity(value){
   return {name:cleanName(name),email};
 }
 
-function title(sig){
+function title(sig,authoritativeName=""){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
-  const cleanPart=v=>String(v||"").replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"").replace(/\s+/g," ").trim();
+  const auth=nameParts(authoritativeName||"");
+  const authSurname=String(auth.surname||"").toLowerCase();
+
+  const cleanPart=v=>String(v||"")
+    .replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"")
+    .replace(/\s+/g," ")
+    .trim();
+
+  const hasTitleWord=v=>TITLE_WORDS.some(t=>String(v||"").toLowerCase().includes(t));
+
+  function stripAuthoritativeOnly(v){
+    const original=String(v||"").trim();
+    let plain=cleanPart(original);
+    if(!plain)return "";
+    const authName=cleanName(authoritativeName||"");
+    if(authName){
+      const low=plain.toLowerCase(),alow=authName.toLowerCase();
+      if(low.startsWith(alow+" "))return cleanPart(plain.slice(authName.length));
+    }
+    if(authSurname){
+      const low=plain.toLowerCase();
+      if(low===authSurname)return "";
+      if(low.startsWith(authSurname+" ")){
+        const rem=cleanPart(plain.slice(auth.surname.length));
+        if(hasTitleWord(rem)||rem.endsWith("&"))return rem;
+      }
+    }
+    return original;
+  }
+
+  function stripKnownNamePrefix(v){
+    let raw=cleanPart(v);
+    if(!raw)return "";
+
+    const split=splitNameTitleLine(raw);
+    if(split&&split.title)return cleanPart(split.title);
+
+    const authName=cleanName(authoritativeName||"");
+    if(authName){
+      const low=raw.toLowerCase(),alow=authName.toLowerCase();
+      if(low.startsWith(alow+" ")){
+        const rem=cleanPart(raw.slice(authName.length));
+        if(hasTitleWord(rem))return rem;
+      }
+    }
+
+    // Outlook sometimes wraps first and last name separately. If the title line begins
+    // with the authoritative surname, remove that surname before evaluating the title.
+    if(authSurname){
+      const low=raw.toLowerCase();
+      if(low===authSurname)return "";
+      if(low.startsWith(authSurname+" ")){
+        const rem=cleanPart(raw.slice(auth.surname.length));
+        if(hasTitleWord(rem)||rem.endsWith("&"))return rem;
+      }
+    }
+
+    // Last-resort same-line nickname/full-name split.
+    const words=raw.split(/\s+/).filter(Boolean);
+    for(let n=2;n<=Math.min(4,words.length-1);n++){
+      const possibleName=words.slice(0,n).join(" ");
+      const rem=words.slice(n).join(" ");
+      if(looksLikePersonName(possibleName)&&hasTitleWord(rem))return cleanPart(rem);
+    }
+    return raw;
+  }
+
   const joinParts=parts=>{
     let out="";
     for(const raw of parts){
@@ -217,41 +283,41 @@ function title(sig){
     }
     return out.replace(/\s+/g," ").trim();
   };
+
   const canContinue=(current,next)=>{
     const c=String(current||"").trim(),n=String(next||"").trim(),nl=n.toLowerCase();
     if(!n)return false;
     if(c.endsWith("&")||n.startsWith("&"))return true;
-    if(/^\s*[|•·—–]/.test(n)&&TITLE_WORDS.some(t=>nl.includes(t)))return true;
+    if(/^\s*[|•·—–]/.test(n)&&hasTitleWord(nl))return true;
+    // A short first title fragment can wrap before another recognizable title phrase.
+    if(c.split(/\s+/).length<=3&&hasTitleWord(c)&&hasTitleWord(nl))return true;
     return false;
   };
 
   for(let i=0;i<lines.length;i++){
-    const line=lines[i],low=line.toLowerCase();
-    if(isClosingPhrase(line)||line.length>140)continue;
+    const line=lines[i];
+    if(isClosingPhrase(line)||line.length>160)continue;
+
+    const stripped=stripKnownNamePrefix(line);
+    if(stripped!==cleanPart(line) && (hasTitleWord(stripped)||stripped.endsWith("&"))){
+      const parts=[stripped];
+      if(i+1<lines.length&&canContinue(parts[0],lines[i+1]))parts.push(stripAuthoritativeOnly(lines[i+1]));
+      return joinParts(parts);
+    }
 
     const split=splitNameTitleLine(line);
     if(split&&split.title){
       const parts=[split.title];
-      if(i+1<lines.length&&canContinue(parts[0],lines[i+1]))parts.push(lines[i+1]);
+      if(i+1<lines.length&&canContinue(parts[0],lines[i+1]))parts.push(stripAuthoritativeOnly(lines[i+1]));
       return joinParts(parts);
     }
 
-    const nm=signatureNameFromLine(line);
-    if(nm&&cleanName(line)===cleanName(nm)){
-      if(i+1<lines.length){
-        const first=cleanPart(lines[i+1]),firstLow=first.toLowerCase();
-        if(TITLE_WORDS.some(t=>firstLow.includes(t))){
-          const parts=[first];
-          if(i+2<lines.length&&canContinue(parts[0],lines[i+2]))parts.push(lines[i+2]);
-          return joinParts(parts);
-        }
-      }
-      continue;
-    }
-
-    if(TITLE_WORDS.some(t=>low.includes(t))&&!COMPANY_WORDS.some(w=>(" "+low).includes(w))){
-      const parts=[line];
-      if(i+1<lines.length&&canContinue(parts[0],lines[i+1]))parts.push(lines[i+1]);
+    const low=line.toLowerCase();
+    if(hasTitleWord(low)&&!COMPANY_WORDS.some(w=>(" "+low).includes(w))){
+      const first=stripKnownNamePrefix(line);
+      if(!first||!hasTitleWord(first))continue;
+      const parts=[first];
+      if(i+1<lines.length&&canContinue(parts[0],lines[i+1]))parts.push(stripAuthoritativeOnly(lines[i+1]));
       return joinParts(parts);
     }
   }
@@ -530,7 +596,7 @@ function parseContactFromSignature(senderName,senderEmail,signatureText){
   return Object.assign(
     {},
     nameParts(resolvedName),
-    {companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig),email:cleanEmail(senderEmail)},
+    {companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig,resolvedName),email:cleanEmail(senderEmail)},
     phones(sig),
     {businessHomePage:site},
     address(sig),
@@ -581,6 +647,99 @@ function splitMessage(body,currentName,currentEmail){
     if(!prev||score>prev.score)bestByKey.set(key,{score,seg});
   }
   return [...bestByKey.values()].map(x=>x.seg);
+}
+
+
+function plainTextOccurrenceCandidates(body,currentName,currentEmail,myEmail){
+  const lines=norm(body).split("\n").map(x=>x.trim());
+  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
+  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
+
+  // Build an authoritative identity table from every visible forwarded From: header.
+  const identities=new Map();
+  for(const line of lines){
+    const m=line.match(/^\s*From:\s*(.+)$/i);
+    if(!m)continue;
+    const id=headerIdentity(m[1]);
+    if(id.email&&looksLikePersonName(id.name||""))identities.set(id.email,{name:id.name,email:id.email,authoritative:true});
+  }
+  const ce=cleanEmail(currentEmail);
+  if(ce&&!sameEmail(ce,myEmail)&&looksLikePersonName(currentName||"")&&!identities.has(ce)){
+    identities.set(ce,{name:cleanName(currentName),email:ce,authoritative:true});
+  }
+
+  const out=[];
+  let occurrence=0;
+  for(let i=0;i<lines.length;i++){
+    if(isHeader(lines[i]))continue;
+    const email=cleanEmail(lines[i]);
+    if(!email||sameEmail(email,myEmail))continue;
+
+    // A signature occurrence must have a plausible person/name line immediately above
+    // the contact data. Search upward from the email anchor but never cross a message header.
+    let start=-1;
+    for(let j=i-1;j>=Math.max(0,i-10);j--){
+      const v=lines[j];
+      if(isHeader(v)||isDisclaimer(v))break;
+      if(!v||isClosingPhrase(v))continue;
+      if(signatureNameFromLine(v)){start=j;break}
+    }
+    if(start<0)continue;
+
+    // Reject blocks that contain another email address between the proposed name and this
+    // anchor; that usually means the name belonged to a previous signature.
+    let crossedOtherEmail=false;
+    for(let j=start;j<i;j++){
+      const e=cleanEmail(lines[j]);
+      if(e&&!sameEmail(e,email)){crossedOtherEmail=true;break}
+    }
+    if(crossedOtherEmail)continue;
+
+    let end=i;
+    for(let j=i+1;j<Math.min(lines.length,i+4);j++){
+      const v=lines[j];
+      if(!v||isHeader(v)||isDisclaimer(v)||signatureNameFromLine(v)||cleanEmail(v))break;
+      if(signatureScore(v)>0||/^https?:|^www\./i.test(v)){end=j;continue}
+      break;
+    }
+
+    const sig=cleanSignatureText(lines.slice(start,end+1).filter(Boolean).join("\n"));
+    if(!sig)continue;
+    const sigScore=norm(sig).split("\n").reduce((t,l)=>t+signatureScore(l),0);
+    if(sigScore<5)continue;
+
+    const headerId=identities.get(email);
+    const signatureName=signatureNameFromLine(lines[start])||inferPersonName(sig);
+    const name=headerId?.name || (sameEmail(email,ce)&&looksLikePersonName(currentName||"")?cleanName(currentName):signatureName);
+    if(!name||!looksLikePersonName(name))continue;
+
+    const parsed=parseContactFromSignature(name,email,sig);
+    if(headerId?.authoritative){
+      const np=nameParts(name);
+      parsed.givenName=np.givenName;parsed.middleName=np.middleName;parsed.surname=np.surname;
+    }
+    parsed.email=email;
+    parsed.signature=sig;
+    parsed.personalNotes=sig;
+    parsed._debug={
+      source:headerId?.authoritative?"Plain-text signature occurrence + forwarded From identity":"Plain-text signature occurrence",
+      headerAuthoritative:!!headerId?.authoritative,
+      headerName:headerId?.name||"",
+      occurrence,
+      anchorLine:i,
+      textSignature:sig,
+      htmlSignature:""
+    };
+    out.push({
+      score:50+sigScore+(headerId?.authoritative?50:0),
+      name,email,text:sig,parsed,
+      headerAuthoritative:!!headerId?.authoritative,
+      occurrenceKey:`plain:${i}:${occurrence}`,
+      occurrence
+    });
+    occurrence++;
+  }
+  return out;
 }
 
 function headerSignatureCandidates(body,currentName,currentEmail,myEmail){
@@ -738,7 +897,22 @@ function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
   }));
 }
 
-function renderCandidates(){const box=$("candidates");box.innerHTML="";candidates.forEach((c,i)=>{const el=document.createElement("div");el.className="candidate";el.innerHTML=`<div class="candidate-head"><input type="checkbox" data-candidate="${i}" checked><div><div class="candidate-name">${html(c.name||"Unknown sender")}</div><div class="muted">${html(c.email||"No email found")}</div></div></div><div class="preview">${html(c.parsed.signature||"No signature block confidently found")}</div>`;box.appendChild(el)});$("candidateSection").hidden=false}
+function renderCandidates(){
+  const box=$("candidates");box.innerHTML="";
+  const totals=new Map();
+  for(const c of candidates){const k=cleanEmail(c.email)||String(c.name||"");totals.set(k,(totals.get(k)||0)+1)}
+  const seen=new Map();
+  candidates.forEach((c,i)=>{
+    const k=cleanEmail(c.email)||String(c.name||"");
+    const n=(seen.get(k)||0)+1;seen.set(k,n);
+    const total=totals.get(k)||1;
+    const occ=total>1?`<div class="muted">Signature ${n} of ${total}</div>`:"";
+    const el=document.createElement("div");el.className="candidate";
+    el.innerHTML=`<div class="candidate-head"><input type="checkbox" data-candidate="${i}" checked><div><div class="candidate-name">${html(c.name||"Unknown sender")}</div><div class="muted">${html(c.email||"No email found")}</div>${occ}</div></div><div class="preview">${html(c.parsed.signature||"No signature block confidently found")}</div>`;
+    box.appendChild(el)
+  });
+  $("candidateSection").hidden=false
+}
 function html(s){return String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]))}
 function visibleSignatureTextFromNode(node){
   try{
@@ -888,7 +1062,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.7.2 — stricter image-signature OCR classification.
+// v2.7.3 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -1210,24 +1384,28 @@ async function scan(){try{
   const item=Office.context.mailbox.item;if(!item||item.itemType!==Office.MailboxEnums.ItemType.Message)throw new Error("Open or select an email message first.");
   const from=item.from||{},body=await readBody(item);
   const myEmail=(Office.context.mailbox.userProfile?.emailAddress||"").toLowerCase();
-  const htmlCandidates=body.html?htmlSignatureCandidates(body.html,from.displayName||"",from.emailAddress||"",myEmail):[];
-  const textCandidates=anchoredSignatureCandidates(body.text,from.displayName||"",from.emailAddress||"",myEmail);
 
-  // Forwarded-header occurrences are already tightly bounded and identity-authoritative.
-  // Keep every occurrence, including identical signatures. Do not collapse them by email.
-  const authoritative=textCandidates.filter(c=>c.headerAuthoritative||c.parsed?._debug?.headerAuthoritative);
-  const authoritativeEmails=new Set(authoritative.map(c=>cleanEmail(c.email)).filter(Boolean));
+  const occurrenceCandidates=plainTextOccurrenceCandidates(body.text,from.displayName||"",from.emailAddress||"",myEmail);
+  const occurrenceEmails=new Set(occurrenceCandidates.map(c=>cleanEmail(c.email)).filter(Boolean));
 
-  // For all other contacts, retain the HTML/plain-text merge behavior and one candidate per email.
+  // HTML and legacy text parsing are now fallback paths only. If Outlook Text yielded one
+  // or more tightly bounded signature occurrences for an email address, those occurrences
+  // are authoritative and HTML cannot replace their Notes, title, identity, or count.
+  const htmlCandidates=(body.html?htmlSignatureCandidates(body.html,from.displayName||"",from.emailAddress||"",myEmail):[])
+    .filter(c=>!occurrenceEmails.has(cleanEmail(c.email)));
+  const textCandidates=anchoredSignatureCandidates(body.text,from.displayName||"",from.emailAddress||"",myEmail)
+    .filter(c=>!occurrenceEmails.has(cleanEmail(c.email)));
+
   const merged=new Map();
-  const htmlMap=new Map(htmlCandidates.filter(c=>!authoritativeEmails.has(cleanEmail(c.email))).map(c=>[cleanEmail(c.email),c]));
-  const textMap=new Map(textCandidates.filter(c=>!authoritativeEmails.has(cleanEmail(c.email))).map(c=>[cleanEmail(c.email),c]));
+  const htmlMap=new Map(htmlCandidates.map(c=>[cleanEmail(c.email),c]));
+  const textMap=new Map(textCandidates.map(c=>[cleanEmail(c.email),c]));
   const keys=new Set([...htmlMap.keys(),...textMap.keys()]);
   for(const key of keys){
     const combined=mergeCandidatePair(htmlMap.get(key),textMap.get(key));
     if(combined)merged.set(key,combined);
   }
-  candidates=[...authoritative,...merged.values()];
+
+  candidates=[...occurrenceCandidates,...merged.values()];
 
   try{
     const currentEmail=String(from.emailAddress||"").toLowerCase();
