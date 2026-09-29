@@ -737,6 +737,48 @@ function parsedCompleteness(p){
   score+=Math.min(sigLines,10)/10;
   return score;
 }
+
+function signatureBodyNoise(text){
+  const t=String(text||"");
+  let n=0;
+  const patterns=[
+    /\bgood (?:morning|afternoon|evening)\b/i,
+    /\bplease see attached\b/i,
+    /\bpayment options?\b/i,
+    /\bremitted?\b/i,
+    /\bwire transfer\b/i,
+    /\bcustomer id\b/i,
+    /\bbilling zip\b/i,
+    /\bplease reach out\b/i,
+    /^\s*(?:from|sent|to|cc|bcc|subject):/im
+  ];
+  for(const rx of patterns)if(rx.test(t))n++;
+  return n;
+}
+function parsedSignatureQuality(p){
+  if(!p)return -999;
+  let score=parsedCompleteness(p)*3;
+  const sig=cleanSignatureText(p.signature||"");
+  const lines=sig.split("\n").map(x=>x.trim()).filter(Boolean);
+  if(lines.length>=4&&lines.length<=14)score+=5;
+  else if(lines.length>24)score-=8;
+  if(p.email&&sig.toLowerCase().includes(String(p.email).toLowerCase()))score+=4;
+  score-=signatureBodyNoise(sig)*8;
+  if(p.jobTitle){
+    const full=[p.givenName,p.middleName,p.surname].filter(Boolean).join(" ").trim();
+    if(full&&String(p.jobTitle).toLowerCase().includes(full.toLowerCase()))score-=8;
+  }
+  if(/\b(?:check|remitted|payment|invoice)\b/i.test(String(p.companyName||"")))score-=10;
+  return score;
+}
+function preferPlainTextCandidate(htmlParsed,textParsed){
+  if(!textParsed)return false;
+  const tq=parsedSignatureQuality(textParsed),hq=parsedSignatureQuality(htmlParsed);
+  const clean=signatureBodyNoise(textParsed.signature||"")===0;
+  const enough=parsedCompleteness(textParsed)>=4;
+  return clean&&enough&&tq>=hq-2;
+}
+
 function mergeParsed(primary,secondary,sourceLabel){
   const a={...(primary||{})},b=secondary||{};
   const fill=["givenName","middleName","surname","companyName","jobTitle","email","businessPhone","mobilePhone","businessFax","businessHomePage","street","city","state","postalCode","countryOrRegion"];
@@ -767,7 +809,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.6.7 — stricter image-signature OCR classification.
+// v2.6.8 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -1061,8 +1103,26 @@ async function scan(){try{
   for(const key of keys){
     const h=htmlMap.get(key),t=textMap.get(key);
     if(h&&t){
-      const parsed=mergeParsed(h.parsed,t.parsed,"HTML + plain-text merged");
-      merged.set(key,{...h,parsed,text:parsed.signature});
+      let parsed;
+      if(preferPlainTextCandidate(h.parsed,t.parsed)){
+        parsed=mergeParsed(t.parsed,h.parsed,"Plain text authoritative; HTML fills blanks only");
+        parsed.signature=cleanSignatureText(t.parsed.signature||"");
+        parsed.personalNotes=parsed.signature;
+        parsed._debug={...(parsed._debug||{}),source:"Plain text authoritative; HTML fills blanks only",htmlSignature:h.parsed.signature||"",textSignature:t.parsed.signature||""};
+        merged.set(key,{...t,parsed,text:parsed.signature});
+      }else{
+        const hq=parsedSignatureQuality(h.parsed),tq=parsedSignatureQuality(t.parsed);
+        if(tq>hq){
+          parsed=mergeParsed(t.parsed,h.parsed,"Plain text preferred by signature quality");
+          parsed.signature=cleanSignatureText(t.parsed.signature||parsed.signature||"");
+          parsed.personalNotes=parsed.signature;
+          parsed._debug={...(parsed._debug||{}),source:"Plain text preferred by signature quality",htmlSignature:h.parsed.signature||"",textSignature:t.parsed.signature||""};
+          merged.set(key,{...t,parsed,text:parsed.signature});
+        }else{
+          parsed=mergeParsed(h.parsed,t.parsed,"HTML preferred by signature quality");
+          merged.set(key,{...h,parsed,text:parsed.signature});
+        }
+      }
     }else if(h){h.parsed._debug={source:"HTML only",htmlSignature:h.parsed.signature||"",textSignature:""};merged.set(key,h)}
     else if(t){t.parsed._debug={source:"Plain text only",htmlSignature:"",textSignature:t.parsed.signature||""};merged.set(key,t)}
   }
