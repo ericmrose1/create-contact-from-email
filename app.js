@@ -63,20 +63,24 @@ function phones(sig){
   }
 
   for(const line of lines){
+    // Direct/Text before number.
     for(const m of line.matchAll(/(?:^|[|•;])\s*(?:\(\s*)?(direct\s*[/&+\-]\s*text|direct\s+text|text\s*[/&+\-]\s*direct)(?:\s*\))?\s*[:.\-]?\s*((?:\+?1[ .-]?)?(?:\(?\d{3}\)?[ .-]*)\d{3}[ .-]*\d{4})(?:[ \t]*(?:x|ext\.?|extension)[ \t]*[:.\-]?[ \t]*(\d+))?/gim))
       assign("directtext",m[2],m[3]);
 
+    // Label before phone, e.g. Office 203... or (O) 307...
     for(const m of line.matchAll(/(?:^|[|•;])\s*(?:\(\s*)?(office|business|phone|tel|telephone|direct|mobile|cell|cellular|fax|O|D|M|C|F)(?:\s*\))?\s*[:.\-]?\s*((?:\+?1[ .-]?)?(?:\(?\d{3}\)?[ .-]*)\d{3}[ .-]*\d{4})(?:[ \t]*(?:x|ext\.?|extension)[ \t]*[:.\-]?[ \t]*(\d+))?/gim))
       assign(m[1],m[2],m[3]);
 
+    // Phone followed by short label, e.g. 307.200.2210 (O)
     for(const m of line.matchAll(/((?:\+?1[ .-]?)?(?:\(?\d{3}\)?[ .-]*)\d{3}[ .-]*\d{4})(?:[ \t]*(?:x|ext\.?|extension)[ \t]*[:.\-]?[ \t]*(\d+))?[ \t]*\(\s*(O|D|M|C|F)\s*\)/gim))
       assign(m[3],m[1],m[2]);
 
+    // Phone followed by word label.
     for(const m of line.matchAll(/((?:\+?1[ .-]?)?(?:\(?\d{3}\)?[ .-]*)\d{3}[ .-]*\d{4})(?:[ \t]*(?:x|ext\.?|extension)[ \t]*[:.\-]?[ \t]*(\d+))?[ \t]+(Office|Business|Direct\/Text|Direct|Mobile|Cell|Fax)\b/gim))
       assign(m[3].replace(/\//g,""),m[1],m[2]);
   }
 
-  if(!out.businessPhone && !out.mobilePhone){
+  if(!out.businessPhone&&!out.mobilePhone){
     const vals=phoneTokens(lines.join("\n")).map(x=>phoneForOutlook(x.value)).filter(Boolean);
     const unique=[...new Set(vals)];
     if(unique.length===1)out.businessPhone=unique[0];
@@ -127,78 +131,102 @@ function website(sig,senderEmail){
   if(domain&&!personal.test(domain))return "https://"+domain.toLowerCase();
   return "";
 }
-function title(sig,personName=""){
+
+function isClosingPhrase(line){
+  const v=String(line||"").toLowerCase()
+    .replace(/[.,!;:]+$/g,"")
+    .replace(/\s+/g," ")
+    .trim();
+  if(!v)return false;
+  return new Set([
+    "thank you","thanks","many thanks","thank you very much","thank you again",
+    "best","best regards","kind regards","warm regards","regards",
+    "sincerely","respectfully","cheers","all the best","with appreciation"
+  ]).has(v);
+}
+
+function splitNameTitleLine(line){
+  const raw=String(line||"").replace(/\s+/g," ").trim();
+  if(!raw || isClosingPhrase(raw))return null;
+
+  // Delimited name/title: "Linda Shin | Associate"
+  const pieces=raw.split(/\s*(?:\||•|·|—|–)\s*/).map(x=>x.trim()).filter(Boolean);
+  if(pieces.length>1 && looksLikePersonName(pieces[0])){
+    const rest=pieces.slice(1).join(" | ").trim();
+    if(rest && TITLE_WORDS.some(t=>rest.toLowerCase().includes(t))){
+      return {name:pieces[0],title:rest};
+    }
+  }
+
+  // Undelimited name/title: "Alex Athanasopoulos   Admin & Project Support Coordinator"
+  const words=raw.split(/\s+/).filter(Boolean);
+  for(let n=2;n<=Math.min(4,words.length-1);n++){
+    const possibleName=words.slice(0,n).join(" ");
+    const possibleTitle=words.slice(n).join(" ");
+    if(looksLikePersonName(possibleName) &&
+       TITLE_WORDS.some(t=>possibleTitle.toLowerCase().includes(t))){
+      return {name:possibleName,title:possibleTitle};
+    }
+  }
+  return null;
+}
+
+function headerIdentity(value){
+  const raw=String(value||"").trim();
+  const email=cleanEmail(raw);
+  let name=raw;
+  if(email)name=name.replace(new RegExp(email.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"i")," ");
+  name=name
+    .replace(/<[^>]*>/g," ")
+    .replace(/\[[^\]]*mailto:[^\]]*\]/ig," ")
+    .replace(/\bmailto:\S+/ig," ")
+    .replace(/[<>]/g," ")
+    .replace(/\s+/g," ")
+    .trim();
+  return {name:cleanName(name),email};
+}
+
+function title(sig){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
-  const wanted=cleanName(personName||"");
   for(let i=0;i<lines.length;i++){
     const line=lines[i],low=line.toLowerCase();
-    if(line.length>140||!TITLE_WORDS.some(t=>low.includes(t))||COMPANY_WORDS.some(w=>(" "+low).includes(w)))continue;
-    let out=line;
-    if(wanted && cleanName(line).toLowerCase().startsWith(wanted.toLowerCase()+" ")){
-      out=line.slice(wanted.length).replace(/^[-|•·—–\s]+/,"").trim();
-    }else{
-      const split=splitNameTitleLine(line);
-      if(split)out=split.title;
-      else{
-        const person=personNameFromLine(line);
-        if(person&&out.toLowerCase().startsWith(person.toLowerCase()))out=out.slice(person.length).replace(/^[-|•·—–\s]+/,"");
+    if(isClosingPhrase(line)||line.length>120)continue;
+
+    const split=splitNameTitleLine(line);
+    if(split&&split.title){
+      let out=split.title;
+      const next=lines[i+1]||"",nextLow=next.toLowerCase();
+      if(next&&/^\s*[|•·—–]/.test(next)&&TITLE_WORDS.some(t=>nextLow.includes(t))){
+        const extra=next.replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"");
+        if(extra)out=(out?out+" | ":"")+extra;
       }
+      return out;
     }
-    out=out.replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"").trim();
+
+    if(!TITLE_WORDS.some(t=>low.includes(t))||COMPANY_WORDS.some(w=>(" "+low).includes(w)))continue;
+    let out=line.replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"").trim();
     const next=lines[i+1]||"",nextLow=next.toLowerCase();
     if(next&&/^\s*[|•·—–]/.test(next)&&TITLE_WORDS.some(t=>nextLow.includes(t))){
       const extra=next.replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"");
       if(extra)out=(out?out+" | ":"")+extra;
     }
-    if(out)return out;
+    return out;
   }
-  return"";
+  return "";
 }
-
-function isClosingPhrase(line){
-  const v=String(line||"").toLowerCase().replace(/[.,!;:]+$/g,"").replace(/\s+/g," ").trim();
-  if(!v)return false;
-  const exact=new Set([
-    "thank you","thanks","many thanks","thank you very much",
-    "best","best regards","kind regards","warm regards","regards",
-    "sincerely","respectfully","cheers","all the best",
-    "with appreciation","thank you again"
-  ]);
-  return exact.has(v)||/^thanks?\s+(?:again|very much)$/i.test(v);
-}
-function trimLeadingClosings(text){
-  const lines=norm(text).split("\n");
-  while(lines.length && (!lines[0].trim() || isClosingPhrase(lines[0])))lines.shift();
-  return cleanSignatureText(lines.join("\n"));
-}
-
 function looksLikePersonName(line){
-  const v=(line||"").trim();if(!v||v.length<4||v.length>55)return false;
-  if(isClosingPhrase(v))return false;
+  const v=(line||"").trim();
+  if(!v||v.length<4||v.length>70||isClosingPhrase(v))return false;
   if(cleanEmail(v)||/\d|https?:|www\.|@|\b(?:street|st\.?|road|rd\.?|ave\.?|avenue|blvd\.?|boulevard|suite|ste\.?|drive|dr\.?|lane|ln\.?|city|inc\.?|llc|corp\.?|company|garage|workshop)\b/i.test(v))return false;
-  const low=v.toLowerCase();if(TITLE_WORDS.some(t=>low.includes(t))||COMPANY_WORDS.some(w=>(" "+low).includes(w)))return false;
-  const words=v.replace(/[,]/g," ").split(/\s+/).filter(Boolean);if(words.length<2||words.length>5)return false;
+  const low=v.toLowerCase();
+  if(TITLE_WORDS.some(t=>low.includes(t))||COMPANY_WORDS.some(w=>(" "+low).includes(w)))return false;
+  const words=v.replace(/[,]/g," ").split(/\s+/).filter(Boolean);
+  if(words.length<2||words.length>5)return false;
   return words.every(w=>/^[A-Za-z][A-Za-z'.-]*$/.test(w));
 }
-function splitNameTitleLine(line){
-  const raw=String(line||"").trim();
-  if(!raw)return null;
-  const pieces=raw.split(/\s*(?:\||•|·|—|–)\s*/).map(x=>x.trim()).filter(Boolean);
-  if(pieces.length>1 && looksLikePersonName(pieces[0])){
-    const rest=pieces.slice(1).join(" | ").trim();
-    if(rest && TITLE_WORDS.some(t=>rest.toLowerCase().includes(t)))return {name:pieces[0],title:rest};
-  }
-  const words=raw.split(/\s+/).filter(Boolean);
-  for(let n=2;n<=Math.min(4,words.length-1);n++){
-    const name=words.slice(0,n).join(" ");
-    const rest=words.slice(n).join(" ").trim();
-    if(looksLikePersonName(name) && TITLE_WORDS.some(t=>rest.toLowerCase().includes(t)))return {name,title:rest};
-  }
-  return null;
-}
-
 function personNameFromLine(line){
   const raw=(line||"").trim();
+  if(isClosingPhrase(raw))return "";
   if(looksLikePersonName(raw))return raw;
   const split=splitNameTitleLine(raw);
   return split?split.name:"";
@@ -237,9 +265,9 @@ function companyFromDomain(senderEmail,site){
 }
 function company(sig,name,senderEmail,site){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean),lowName=(name||"").toLowerCase();
-  const domainCompany=companyFromDomain(senderEmail,site);
   const noise=/\b(?:payment|invoice|billing|remitted|remit|check|cheque|wire transfer|credit card|echeck|customer id|pay online|please see attached|please reach|thank you)\b/i;
   const addressLike=/\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|loop|suite|ste\.?|bldg|building)\b/i;
+
   for(const line of lines){
     const low=" "+line.toLowerCase();
     if(line.length<=2||line.length>=90||noise.test(line))continue;
@@ -249,10 +277,13 @@ function company(sig,name,senderEmail,site){
       return line;
     }
   }
+
+  const domainCompany=companyFromDomain(senderEmail,site);
   if(domainCompany)return domainCompany;
+
   for(const line of lines.slice(0,10)){
     const low=line.toLowerCase();
-    if(noise.test(line)||low===lowName||looksLikePersonName(line)||low.includes("@")||/\d{3}[\s.\-]\d{3}/.test(line)||/^https?:|^www\./i.test(line))continue;
+    if(noise.test(line)||low===lowName||isClosingPhrase(line)||looksLikePersonName(line)||low.includes("@")||/\d{3}[\s.\-]\d{3}/.test(line)||/^https?:|^www\./i.test(line))continue;
     if(TITLE_WORDS.some(t=>low.includes(t)))continue;
     if(/^from:|^sent:|^to:|^cc:|^subject:/i.test(line))continue;
     if(addressLike.test(line)||/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))continue;
@@ -384,16 +415,8 @@ function isolateSignature(segmentText,senderEmail){
         hi++;
       }
       let chunk=rawLines.slice(lo,hi+1).filter(Boolean);
-      let localAnchor=chunk.findIndex(l=>cleanEmail(l)===email);
-      if(localAnchor<0)localAnchor=chunk.length-1;
-      let nameAt=-1;
-      for(let j=localAnchor-1;j>=Math.max(0,localAnchor-8);j--){
-        if(!isClosingPhrase(chunk[j])&&personNameFromLine(chunk[j])){nameAt=j;break}
-      }
-      if(nameAt>=0)chunk=chunk.slice(nameAt);
-      else{
-        while(chunk.length>5 && signatureScore(chunk[0])===0 && signatureScore(chunk[1])===0)chunk.shift();
-      }
+      // If there was no blank line, trim leading prose until the block becomes signature-like.
+      while(chunk.length>5 && signatureScore(chunk[0])===0 && signatureScore(chunk[1])===0)chunk.shift();
       const score=chunk.reduce((t,l)=>t+signatureScore(l),0)+8;
       if(!best||score>best.score)best={score,chunk};
     }
@@ -416,43 +439,97 @@ function isolateSignature(segmentText,senderEmail){
   if(best.score>=3)return best.chunk.join("\n");
   return "";
 }
-function parseContact(senderName,senderEmail,segmentText){
-  const rawSig=isolateSignature(segmentText,senderEmail);
-  return parseContactFromSignature(senderName,senderEmail,rawSig);
-}
 function parseContactFromSignature(senderName,senderEmail,signatureText){
-  const sig=trimLeadingClosings(signatureText);
+  const sig=cleanSignatureText(signatureText);
   const inferred=inferPersonName(sig);
-  const senderLooksHuman=looksLikePersonName(senderName||"")&&!isClosingPhrase(senderName||"");
-  const resolvedName=senderLooksHuman?senderName:(inferred||"");
+  const senderLooksHuman=looksLikePersonName(senderName||"");
+  const resolvedName=senderLooksHuman?cleanName(senderName):(inferred||"");
   const site=website(sig,senderEmail);
-  return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig,resolvedName),email:senderEmail||""},phones(sig),{businessHomePage:site},address(sig),{signature:sig,personalNotes:sig});
+  return Object.assign(
+    {},
+    nameParts(resolvedName),
+    {companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig),email:cleanEmail(senderEmail)},
+    phones(sig),
+    {businessHomePage:site},
+    address(sig),
+    {signature:sig,personalNotes:sig}
+  );
+}
+
+function parseContact(senderName,senderEmail,segmentText){
+  return parseContactFromSignature(senderName,senderEmail,isolateSignature(segmentText,senderEmail));
 }
 function sameEmail(a,b){return cleanEmail(a)&&cleanEmail(a)===cleanEmail(b)}
 function cleanSignatureText(sig){
-  return norm(sig).split("\n").map(x=>x.trim()).filter(Boolean).filter(line=>{
+  let lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean).filter(line=>{
     if(/^(?:https?:\/\/)?[^\s]+\.(?:png|jpe?g|gif|svg|webp|bmp|ico)(?:[?#].*)?$/i.test(line))return false;
     if(/^cid:|^data:image/i.test(line))return false;
     if(/(?:google\.[^/]+\/maps|maps\.google\.|maps\.apple\.|bing\.com\/maps|goo\.gl\/maps|safelinks\.protection\.outlook\.com|urldefense\.proofpoint\.com\/v2\/url\?)/i.test(line))return false;
     return true;
-  }).join("\n")
+  });
+  while(lines.length&&isClosingPhrase(lines[0]))lines.shift();
+  return lines.join("\n");
 }
-function splitMessage(body,currentName,currentEmail){const text=norm(body);const lines=text.split("\n");const headers=[];for(let i=0;i<lines.length;i++){const m=lines[i].match(/^\s*From:\s*(.+)$/i);if(!m)continue;const val=m[1].trim();const email=cleanEmail(val);let name=cleanName(val.replace(email,""));if(!name&&email)name=email.split("@")[0];headers.push({i,name,email})}
-  const firstHeader=headers.length?headers[0].i:lines.length;const out=[];out.push({name:currentName||"Current sender",email:(currentEmail||"").toLowerCase(),text:lines.slice(0,firstHeader).join("\n")});
-  for(let h=0;h<headers.length;h++){const a=headers[h],b=headers[h+1]?headers[h+1].i:lines.length;out.push({name:a.name,email:a.email,text:lines.slice(a.i+1,b).join("\n")})}
-  // A person may appear more than once in a chain. Keep the segment that contains the
-  // strongest sender-specific signature rather than simply keeping the newest occurrence.
+function splitMessage(body,currentName,currentEmail){
+  const text=norm(body),lines=text.split("\n"),headers=[];
+  for(let i=0;i<lines.length;i++){
+    const m=lines[i].match(/^\s*From:\s*(.+)$/i);
+    if(!m)continue;
+    const id=headerIdentity(m[1]);
+    if(id.email)headers.push({i,name:id.name,email:id.email});
+  }
+
+  const firstHeader=headers.length?headers[0].i:lines.length;
+  const out=[{name:cleanName(currentName||"Current sender"),email:cleanEmail(currentEmail),text:lines.slice(0,firstHeader).join("\n"),headerAuthoritative:true}];
+
+  for(let h=0;h<headers.length;h++){
+    const a=headers[h],b=headers[h+1]?headers[h+1].i:lines.length;
+    out.push({name:a.name,email:a.email,text:lines.slice(a.i+1,b).join("\n"),headerAuthoritative:true});
+  }
+
   const bestByKey=new Map();
   for(const seg of out){
-    const key=seg.email||seg.name.toLowerCase();if(!key)continue;
+    const key=seg.email||String(seg.name||"").toLowerCase();
+    if(!key)continue;
     const sig=isolateSignature(seg.text,seg.email);
     let score=norm(sig).split("\n").reduce((t,l)=>t+signatureScore(l),0);
-    if(seg.email && norm(sig).toLowerCase().includes(seg.email.toLowerCase()))score+=6;
+    if(seg.email&&norm(sig).toLowerCase().includes(seg.email.toLowerCase()))score+=6;
+    if(seg.headerAuthoritative&&seg.name&&looksLikePersonName(seg.name))score+=30;
     const prev=bestByKey.get(key);
     if(!prev||score>prev.score)bestByKey.set(key,{score,seg});
   }
-  return [...bestByKey.values()].map(x=>x.seg)}
+  return [...bestByKey.values()].map(x=>x.seg);
+}
 
+function headerSignatureCandidates(body,currentName,currentEmail,myEmail){
+  const out=[];
+  for(const seg of splitMessage(body,currentName,currentEmail)){
+    if(!seg.email||sameEmail(seg.email,myEmail)||!looksLikePersonName(seg.name||""))continue;
+    const sig=cleanSignatureText(isolateSignature(seg.text,seg.email));
+    if(!sig)continue;
+    const parsed=parseContactFromSignature(seg.name,seg.email,sig);
+
+    // The forwarded From: header is authoritative for the full legal/display name.
+    const np=nameParts(seg.name);
+    parsed.givenName=np.givenName;
+    parsed.middleName=np.middleName;
+    parsed.surname=np.surname;
+    parsed.email=seg.email;
+    parsed.signature=sig;
+    parsed.personalNotes=sig;
+    parsed._debug={
+      source:"Forwarded From header authoritative",
+      headerAuthoritative:true,
+      headerName:seg.name,
+      htmlSignature:"",
+      textSignature:sig
+    };
+
+    const score=100+norm(sig).split("\n").reduce((t,l)=>t+signatureScore(l),0);
+    out.push({score,name:seg.name,email:seg.email,text:sig,parsed,headerAuthoritative:true});
+  }
+  return out;
+}
 
 
 function inferAnchoredName(sig,email){
@@ -513,6 +590,10 @@ function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
   const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
   const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
   const byEmail=new Map();
+  // Forwarded/replied From: headers are authoritative for name + email.
+  for(const h of headerSignatureCandidates(body,currentName,currentEmail,myEmail)){
+    byEmail.set((h.email||"").toLowerCase(),h);
+  }
   // v2.5.7: treat the current Outlook sender separately from generic chain detection.
   // Outlook already gives us an authoritative From name + email. If that sender's visible
   // name appears in the body, build the signature directly from that point forward even
@@ -556,15 +637,13 @@ function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
     let emailLocal=chunk.findIndex(l=>cleanEmail(l)===email);
     if(emailLocal<0)emailLocal=chunk.length-1;
     let nameLocal=-1;
-    for(let j=emailLocal-1;j>=Math.max(0,emailLocal-8);j--){if(!isClosingPhrase(chunk[j])&&personNameFromLine(chunk[j])){nameLocal=j;break}}
+    for(let j=emailLocal-1;j>=Math.max(0,emailLocal-8);j--){if(looksLikePersonName(chunk[j])){nameLocal=j;break}}
     if(nameLocal>=0)chunk=chunk.slice(nameLocal);
     else{
       while(chunk.length>5 && signatureScore(chunk[0])===0)chunk.shift();
     }
     while(chunk.length>5 && signatureScore(chunk[chunk.length-1])===0 && signatureScore(chunk[chunk.length-2])===0)chunk.pop();
-    let sig=cleanSignatureText(chunk.join("\n"));
-    const tightened=isolateSignature(sig,email);
-    if(tightened)sig=cleanSignatureText(tightened);
+    const sig=cleanSignatureText(chunk.join("\n"));
     const score=norm(sig).split("\n").reduce((t,l)=>t+signatureScore(l),0);
     if(score<5)continue;
     const inferred=inferAnchoredName(sig,email);
@@ -573,6 +652,7 @@ function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
     // parseContact will isolate again; preserve the exact anchored signature we just selected.
     parsed.signature=sig; parsed.personalNotes=sig;
     const existing=byEmail.get(email);
+    if(existing?.headerAuthoritative)continue;
     if(!existing||score>existing.score)byEmail.set(email,{score,name,email,text:sig,parsed});
   }
   // Current-sender fallback when the signature itself does not print an email address.
@@ -613,7 +693,7 @@ function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
         !!(addr.state&&addr.postalCode),
         !!site,
         !!company(sig,currentName||legacy.name,legacy.email,site),
-        !!title(sig,currentName||legacy.name)
+        !!title(sig)
       ].filter(Boolean).length;
       // Require a genuinely signature-like block, but trust Outlook for who the current
       // sender is. This keeps the safety check without rejecting signatures lacking email.
@@ -733,8 +813,7 @@ function htmlSignatureCandidates(html,currentName,currentEmail,myEmail){
       if(!email||sameEmail(email,myEmail))continue;
       const best=findBestHtmlSignatureContainer(a,email);
       if(!best||best.score<7)continue;
-      const isolated=isolateSignature(best.text,email);
-      const sig=cleanSignatureText(isolated||best.text);
+      const sig=cleanSignatureText(best.text);
       const inferred=inferAnchoredName(sig,email);
       const name=(sameEmail(email,currentEmail)&&looksLikePersonName(currentName||""))?currentName:(inferred||email.split("@")[0]);
       const parsed=parseContactFromSignature(name,email,sig);
@@ -752,48 +831,6 @@ function parsedCompleteness(p){
   score+=Math.min(sigLines,10)/10;
   return score;
 }
-
-function signatureBodyNoise(text){
-  const t=String(text||"");
-  let n=0;
-  const patterns=[
-    /\bgood (?:morning|afternoon|evening)\b/i,
-    /\bplease see attached\b/i,
-    /\bpayment options?\b/i,
-    /\bremitted?\b/i,
-    /\bwire transfer\b/i,
-    /\bcustomer id\b/i,
-    /\bbilling zip\b/i,
-    /\bplease reach out\b/i,
-    /^\s*(?:from|sent|to|cc|bcc|subject):/im
-  ];
-  for(const rx of patterns)if(rx.test(t))n++;
-  return n;
-}
-function parsedSignatureQuality(p){
-  if(!p)return -999;
-  let score=parsedCompleteness(p)*3;
-  const sig=cleanSignatureText(p.signature||"");
-  const lines=sig.split("\n").map(x=>x.trim()).filter(Boolean);
-  if(lines.length>=4&&lines.length<=14)score+=5;
-  else if(lines.length>24)score-=8;
-  if(p.email&&sig.toLowerCase().includes(String(p.email).toLowerCase()))score+=4;
-  score-=signatureBodyNoise(sig)*8;
-  if(p.jobTitle){
-    const full=[p.givenName,p.middleName,p.surname].filter(Boolean).join(" ").trim();
-    if(full&&String(p.jobTitle).toLowerCase().includes(full.toLowerCase()))score-=8;
-  }
-  if(/\b(?:check|remitted|payment|invoice)\b/i.test(String(p.companyName||"")))score-=10;
-  return score;
-}
-function preferPlainTextCandidate(htmlParsed,textParsed){
-  if(!textParsed)return false;
-  const tq=parsedSignatureQuality(textParsed),hq=parsedSignatureQuality(htmlParsed);
-  const clean=signatureBodyNoise(textParsed.signature||"")===0;
-  const enough=parsedCompleteness(textParsed)>=4;
-  return clean&&enough&&tq>=hq-2;
-}
-
 function mergeParsed(primary,secondary,sourceLabel){
   const a={...(primary||{})},b=secondary||{};
   const fill=["givenName","middleName","surname","companyName","jobTitle","email","businessPhone","mobilePhone","businessFax","businessHomePage","street","city","state","postalCode","countryOrRegion"];
@@ -824,7 +861,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.7.0 — stricter image-signature OCR classification.
+// v2.7.1 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -1091,16 +1128,56 @@ async function imageSignatureCandidate(item,htmlText,currentName,currentEmail,my
 
 function readBody(item){
   return new Promise((resolve,reject)=>{
+    let html="",plain="",htmlDone=false,textDone=false,htmlErr=null,textErr=null;
+    const finish=()=>{
+      if(!htmlDone||!textDone)return;
+      if(!plain.trim()&&html.trim())plain=htmlBodyToText(html);
+      if(!plain.trim()&&!html.trim())return reject(new Error(textErr?.message||htmlErr?.message||"Unable to read the email body."));
+      resolve({html,plainText:plain,text:plain});
+    };
     item.body.getAsync(Office.CoercionType.Html,r=>{
-      if(r.status===Office.AsyncResultStatus.Succeeded){
-        const html=r.value||"";
-        const text=htmlBodyToText(html);
-        if(text.trim())return resolve({html,text});
-      }
-      item.body.getAsync(Office.CoercionType.Text,r2=>r2.status===Office.AsyncResultStatus.Succeeded?resolve({html:"",text:r2.value||""}):reject(new Error(r2.error?.message||"Unable to read the email body.")))
-    })
-  })
+      htmlDone=true;
+      if(r.status===Office.AsyncResultStatus.Succeeded)html=r.value||"";
+      else htmlErr=r.error;
+      finish();
+    });
+    item.body.getAsync(Office.CoercionType.Text,r=>{
+      textDone=true;
+      if(r.status===Office.AsyncResultStatus.Succeeded)plain=r.value||"";
+      else textErr=r.error;
+      finish();
+    });
+  });
 }
+
+function mergeCandidatePair(h,t){
+  if(h&&t){
+    if(t.headerAuthoritative||t.parsed?._debug?.headerAuthoritative){
+      const parsed=mergeParsed(t.parsed,h.parsed,"Forwarded header/plain text authoritative; HTML fills blanks");
+      parsed.givenName=t.parsed.givenName;
+      parsed.middleName=t.parsed.middleName;
+      parsed.surname=t.parsed.surname;
+      parsed.email=t.parsed.email;
+      parsed.jobTitle=t.parsed.jobTitle||parsed.jobTitle;
+      parsed.signature=t.parsed.signature;
+      parsed.personalNotes=t.parsed.personalNotes;
+      parsed._debug={...(parsed._debug||{}),source:"Forwarded From header authoritative",headerAuthoritative:true,headerName:t.name};
+      return {...t,parsed,text:parsed.signature,headerAuthoritative:true};
+    }
+    const parsed=mergeParsed(h.parsed,t.parsed,"HTML + plain-text merged");
+    return {...h,parsed,text:parsed.signature};
+  }
+  if(h){
+    h.parsed._debug={source:"HTML only",htmlSignature:h.parsed.signature||"",textSignature:""};
+    return h;
+  }
+  if(t){
+    t.parsed._debug={...(t.parsed._debug||{}),source:t.headerAuthoritative?"Forwarded From header authoritative":"Plain text only",htmlSignature:"",textSignature:t.parsed.signature||""};
+    return t;
+  }
+  return null;
+}
+
 async function scan(){try{
   status("Reading the current email chain…");$("reviewSection").hidden=true;
   const item=Office.context.mailbox.item;if(!item||item.itemType!==Office.MailboxEnums.ItemType.Message)throw new Error("Open or select an email message first.");
@@ -1117,29 +1194,8 @@ async function scan(){try{
   const keys=new Set([...htmlMap.keys(),...textMap.keys()]);
   for(const key of keys){
     const h=htmlMap.get(key),t=textMap.get(key);
-    if(h&&t){
-      let parsed;
-      if(preferPlainTextCandidate(h.parsed,t.parsed)){
-        parsed=mergeParsed(t.parsed,h.parsed,"Plain text authoritative; HTML fills blanks only");
-        parsed.signature=cleanSignatureText(t.parsed.signature||"");
-        parsed.personalNotes=parsed.signature;
-        parsed._debug={...(parsed._debug||{}),source:"Plain text authoritative; HTML fills blanks only",htmlSignature:h.parsed.signature||"",textSignature:t.parsed.signature||""};
-        merged.set(key,{...t,parsed,text:parsed.signature});
-      }else{
-        const hq=parsedSignatureQuality(h.parsed),tq=parsedSignatureQuality(t.parsed);
-        if(tq>hq){
-          parsed=mergeParsed(t.parsed,h.parsed,"Plain text preferred by signature quality");
-          parsed.signature=cleanSignatureText(t.parsed.signature||parsed.signature||"");
-          parsed.personalNotes=parsed.signature;
-          parsed._debug={...(parsed._debug||{}),source:"Plain text preferred by signature quality",htmlSignature:h.parsed.signature||"",textSignature:t.parsed.signature||""};
-          merged.set(key,{...t,parsed,text:parsed.signature});
-        }else{
-          parsed=mergeParsed(h.parsed,t.parsed,"HTML preferred by signature quality");
-          merged.set(key,{...h,parsed,text:parsed.signature});
-        }
-      }
-    }else if(h){h.parsed._debug={source:"HTML only",htmlSignature:h.parsed.signature||"",textSignature:""};merged.set(key,h)}
-    else if(t){t.parsed._debug={source:"Plain text only",htmlSignature:"",textSignature:t.parsed.signature||""};merged.set(key,t)}
+    const combined=mergeCandidatePair(h,t);
+    if(combined)merged.set(key,combined);
   }
   candidates=[...merged.values()];
   // Image-only signatures can coexist with quoted text from older messages. In that case
