@@ -418,13 +418,8 @@ function isolateSignature(segmentText,senderEmail){
 }
 function parseContact(senderName,senderEmail,segmentText){
   const rawSig=isolateSignature(segmentText,senderEmail);
-  const sig=cleanSignatureText(rawSig);
-  const inferred=inferPersonName(sig);
-  const senderLooksHuman=looksLikePersonName(senderName||"");
-  const resolvedName=senderLooksHuman?senderName:(inferred||senderName||"");
-  const site=website(sig,senderEmail);return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig,resolvedName),email:senderEmail||""},phones(sig),{businessHomePage:site},address(sig),{signature:sig,personalNotes:sig})
+  return parseContactFromSignature(senderName,senderEmail,rawSig);
 }
-
 function parseContactFromSignature(senderName,senderEmail,signatureText){
   const sig=trimLeadingClosings(signatureText);
   const inferred=inferPersonName(sig);
@@ -829,7 +824,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.6.9 — stricter image-signature OCR classification.
+// v2.7.0 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
