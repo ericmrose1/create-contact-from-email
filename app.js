@@ -42,54 +42,45 @@ function phoneTokens(sig){
   return c
 }
 function phones(sig){
-  // Phone-label rules:
-  // Office -> Business
-  // Direct/Text -> Mobile
-  // Direct without extension -> Mobile
-  // Direct with extension -> Business/Direct
-  // Mobile/Cell -> Mobile
-  // Fax -> Fax
-  const text=norm(sig).replace(/©/g,"O").replace(/®/g,"O");
+  const lines=norm(sig).replace(/©/g,"O").replace(/®/g,"O").split("\n").map(x=>x.trim()).filter(Boolean);
   const out={businessPhone:"",mobilePhone:"",businessFax:""};
-
   function fmt(num,ext){return phoneForOutlook(num+(ext?` x${ext}`:""));}
-
-  // Direct/Text is always mobile-capable.
-  const dt=text.match(/(?:^|[\n|•;\s])(?:direct\s*[/&+\-]\s*text|direct\s+text|text\s*[/&+\-]\s*direct)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
-  if(dt)out.mobilePhone=fmt(dt[1],dt[2]);
-
-  // Office/business line.
-  const office=text.match(/(?:^|[\n|•;\s])(?:office|business|phone|tel|telephone|O)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
-  if(office)out.businessPhone=fmt(office[1],office[2]);
-
-  // Direct: extension means a business direct line; no extension means mobile.
-  const direct=text.match(/(?:^|[\n|•;\s])(?:direct|D)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
-  if(direct){
-    const val=fmt(direct[1],direct[2]);
-    if(direct[2]){
-      // Personal business direct line takes precedence over a general office number.
-      out.businessPhone=val;
-    }else if(!out.mobilePhone){
-      out.mobilePhone=val;
+  function assign(label,num,ext){
+    const lab=String(label||"").toLowerCase().replace(/[^a-z]/g,"");
+    const val=fmt(num,ext); if(!val)return;
+    if(["office","business","phone","tel","telephone","o"].includes(lab)){
+      if(!out.businessPhone)out.businessPhone=val;
+    }else if(["directtext","textdirect"].includes(lab)){
+      if(!out.mobilePhone)out.mobilePhone=val;
+    }else if(["direct","d"].includes(lab)){
+      if(ext)out.businessPhone=val;
+      else if(!out.mobilePhone)out.mobilePhone=val;
+    }else if(["mobile","cell","cellular","m","c"].includes(lab)){
+      if(!out.mobilePhone)out.mobilePhone=val;
+    }else if(["fax","f"].includes(lab)){
+      if(!out.businessFax)out.businessFax=val;
     }
   }
 
-  // Explicit mobile/cell label.
-  if(!out.mobilePhone){
-    const mobile=text.match(/(?:^|[\n|•;\s])(?:mobile|cell|cellular|M|C)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
-    if(mobile)out.mobilePhone=fmt(mobile[1],mobile[2]);
+  for(const line of lines){
+    for(const m of line.matchAll(/(?:^|[|•;])\s*(?:\(\s*)?(direct\s*[/&+\-]\s*text|direct\s+text|text\s*[/&+\-]\s*direct)(?:\s*\))?\s*[:.\-]?\s*((?:\+?1[ .-]?)?(?:\(?\d{3}\)?[ .-]*)\d{3}[ .-]*\d{4})(?:[ \t]*(?:x|ext\.?|extension)[ \t]*[:.\-]?[ \t]*(\d+))?/gim))
+      assign("directtext",m[2],m[3]);
+
+    for(const m of line.matchAll(/(?:^|[|•;])\s*(?:\(\s*)?(office|business|phone|tel|telephone|direct|mobile|cell|cellular|fax|O|D|M|C|F)(?:\s*\))?\s*[:.\-]?\s*((?:\+?1[ .-]?)?(?:\(?\d{3}\)?[ .-]*)\d{3}[ .-]*\d{4})(?:[ \t]*(?:x|ext\.?|extension)[ \t]*[:.\-]?[ \t]*(\d+))?/gim))
+      assign(m[1],m[2],m[3]);
+
+    for(const m of line.matchAll(/((?:\+?1[ .-]?)?(?:\(?\d{3}\)?[ .-]*)\d{3}[ .-]*\d{4})(?:[ \t]*(?:x|ext\.?|extension)[ \t]*[:.\-]?[ \t]*(\d+))?[ \t]*\(\s*(O|D|M|C|F)\s*\)/gim))
+      assign(m[3],m[1],m[2]);
+
+    for(const m of line.matchAll(/((?:\+?1[ .-]?)?(?:\(?\d{3}\)?[ .-]*)\d{3}[ .-]*\d{4})(?:[ \t]*(?:x|ext\.?|extension)[ \t]*[:.\-]?[ \t]*(\d+))?[ \t]+(Office|Business|Direct\/Text|Direct|Mobile|Cell|Fax)\b/gim))
+      assign(m[3].replace(/\//g,""),m[1],m[2]);
   }
 
-  const fax=text.match(/(?:^|[\n|•;\s])(?:fax|F)\s*[:.\-]?\s*((?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4})(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+))?/im);
-  if(fax)out.businessFax=fmt(fax[1],fax[2]);
-
-  // Conservative fallback for an unlabeled number only when no labeled phone was found.
   if(!out.businessPhone && !out.mobilePhone){
-    const vals=phoneTokens(text).map(x=>phoneForOutlook(x.value)).filter(Boolean);
+    const vals=phoneTokens(lines.join("\n")).map(x=>phoneForOutlook(x.value)).filter(Boolean);
     const unique=[...new Set(vals)];
     if(unique.length===1)out.businessPhone=unique[0];
   }
-
   if(out.businessPhone===out.mobilePhone)out.mobilePhone="";
   if(out.businessPhone===out.businessFax)out.businessFax="";
   return out;
@@ -136,15 +127,24 @@ function website(sig,senderEmail){
   if(domain&&!personal.test(domain))return "https://"+domain.toLowerCase();
   return "";
 }
-function title(sig){
+function title(sig,personName=""){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
+  const wanted=cleanName(personName||"");
   for(let i=0;i<lines.length;i++){
     const line=lines[i],low=line.toLowerCase();
-    if(line.length>100||!TITLE_WORDS.some(t=>low.includes(t))||COMPANY_WORDS.some(w=>(" "+low).includes(w)))continue;
+    if(line.length>140||!TITLE_WORDS.some(t=>low.includes(t))||COMPANY_WORDS.some(w=>(" "+low).includes(w)))continue;
     let out=line;
-    const person=personNameFromLine(line);
-    if(person&&out.toLowerCase().startsWith(person.toLowerCase()))out=out.slice(person.length).replace(/^[-|•·—–\s]+/,"");
-    out=out.replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"");
+    if(wanted && cleanName(line).toLowerCase().startsWith(wanted.toLowerCase()+" ")){
+      out=line.slice(wanted.length).replace(/^[-|•·—–\s]+/,"").trim();
+    }else{
+      const split=splitNameTitleLine(line);
+      if(split)out=split.title;
+      else{
+        const person=personNameFromLine(line);
+        if(person&&out.toLowerCase().startsWith(person.toLowerCase()))out=out.slice(person.length).replace(/^[-|•·—–\s]+/,"");
+      }
+    }
+    out=out.replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"").trim();
     const next=lines[i+1]||"",nextLow=next.toLowerCase();
     if(next&&/^\s*[|•·—–]/.test(next)&&TITLE_WORDS.some(t=>nextLow.includes(t))){
       const extra=next.replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"");
@@ -161,14 +161,29 @@ function looksLikePersonName(line){
   const words=v.replace(/[,]/g," ").split(/\s+/).filter(Boolean);if(words.length<2||words.length>5)return false;
   return words.every(w=>/^[A-Za-z][A-Za-z'.-]*$/.test(w));
 }
+
+function splitNameTitleLine(line){
+  const raw=String(line||"").trim();
+  if(!raw)return null;
+  const pieces=raw.split(/\s*(?:\||•|·|—|–)\s*/).map(x=>x.trim()).filter(Boolean);
+  if(pieces.length>1 && looksLikePersonName(pieces[0])){
+    const rest=pieces.slice(1).join(" | ").trim();
+    if(rest && TITLE_WORDS.some(t=>rest.toLowerCase().includes(t)))return {name:pieces[0],title:rest};
+  }
+  const words=raw.split(/\s+/).filter(Boolean);
+  for(let n=2;n<=Math.min(4,words.length-1);n++){
+    const name=words.slice(0,n).join(" ");
+    const rest=words.slice(n).join(" ").trim();
+    if(looksLikePersonName(name) && TITLE_WORDS.some(t=>rest.toLowerCase().includes(t)))return {name,title:rest};
+  }
+  return null;
+}
+
 function personNameFromLine(line){
   const raw=(line||"").trim();
   if(looksLikePersonName(raw))return raw;
-  // Many signatures put the name and title on the same visual line:
-  // "Linda Shin | Associate" or "Jason Ro • Principal".
-  const pieces=raw.split(/\s*(?:\||•|·|—|–)\s*/).map(x=>x.trim()).filter(Boolean);
-  if(pieces.length>1 && looksLikePersonName(pieces[0]))return pieces[0];
-  return "";
+  const split=splitNameTitleLine(raw);
+  return split?split.name:"";
 }
 function inferPersonName(sig){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
@@ -201,22 +216,25 @@ function companyFromDomain(senderEmail,site){
 }
 function company(sig,name,senderEmail,site){
   const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean),lowName=(name||"").toLowerCase();
-  // First trust explicit company-like text in the signature.
+  const domainCompany=companyFromDomain(senderEmail,site);
+  const noise=/\b(?:payment|invoice|billing|remitted|remit|check|cheque|wire transfer|credit card|echeck|customer id|pay online|please see attached|please reach|thank you)\b/i;
+  const addressLike=/\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|loop|suite|ste\.?|bldg|building)\b/i;
   for(const line of lines){
     const low=" "+line.toLowerCase();
-    if(line.length>2&&line.length<110&&COMPANY_WORDS.some(w=>low.includes(w)))return line;
+    if(line.length<=2||line.length>=90||noise.test(line))continue;
+    if(addressLike.test(line)&&/\d/.test(line))continue;
+    if(COMPANY_WORDS.some(w=>low.includes(w))){
+      if(/\b(?:at|to)\s+\d{1,6}\b/i.test(line))continue;
+      return line;
+    }
   }
-  // If the company is in a logo and not exposed as text, the business domain is safer
-  // than guessing from ordinary email prose.
-  const domainCompany=companyFromDomain(senderEmail,site);
   if(domainCompany)return domainCompany;
-  // Last-resort generic text fallback, deliberately conservative.
   for(const line of lines.slice(0,10)){
     const low=line.toLowerCase();
-    if(low===lowName||looksLikePersonName(line)||low.includes("@")||/\d{3}[\s.\-]\d{3}/.test(line)||/^https?:|^www\./i.test(line))continue;
+    if(noise.test(line)||low===lowName||looksLikePersonName(line)||low.includes("@")||/\d{3}[\s.\-]\d{3}/.test(line)||/^https?:|^www\./i.test(line))continue;
     if(TITLE_WORDS.some(t=>low.includes(t)))continue;
     if(/^from:|^sent:|^to:|^cc:|^subject:/i.test(line))continue;
-    if(/\b(?:p\.?o\.?\s*box|box|street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|loop|suite|ste\.?|bldg|building)\b/i.test(line)||/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))continue;
+    if(addressLike.test(line)||/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))continue;
     if(/\d/.test(line)||/[.!?]\s*$/.test(line)||line.split(/\s+/).length>7)continue;
     if(line.length>=3&&line.length<=60)return line;
   }
@@ -345,8 +363,16 @@ function isolateSignature(segmentText,senderEmail){
         hi++;
       }
       let chunk=rawLines.slice(lo,hi+1).filter(Boolean);
-      // If there was no blank line, trim leading prose until the block becomes signature-like.
-      while(chunk.length>5 && signatureScore(chunk[0])===0 && signatureScore(chunk[1])===0)chunk.shift();
+      let localAnchor=chunk.findIndex(l=>cleanEmail(l)===email);
+      if(localAnchor<0)localAnchor=chunk.length-1;
+      let nameAt=-1;
+      for(let j=localAnchor-1;j>=Math.max(0,localAnchor-8);j--){
+        if(personNameFromLine(chunk[j])){nameAt=j;break}
+      }
+      if(nameAt>=0)chunk=chunk.slice(nameAt);
+      else{
+        while(chunk.length>5 && signatureScore(chunk[0])===0 && signatureScore(chunk[1])===0)chunk.shift();
+      }
       const score=chunk.reduce((t,l)=>t+signatureScore(l),0)+8;
       if(!best||score>best.score)best={score,chunk};
     }
@@ -375,7 +401,7 @@ function parseContact(senderName,senderEmail,segmentText){
   const inferred=inferPersonName(sig);
   const senderLooksHuman=looksLikePersonName(senderName||"");
   const resolvedName=senderLooksHuman?senderName:(inferred||senderName||"");
-  const site=website(sig,senderEmail);return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig),email:senderEmail||""},phones(sig),{businessHomePage:site},address(sig),{signature:sig,personalNotes:sig})
+  const site=website(sig,senderEmail);return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig,resolvedName),email:senderEmail||""},phones(sig),{businessHomePage:site},address(sig),{signature:sig,personalNotes:sig})
 }
 
 function parseContactFromSignature(senderName,senderEmail,signatureText){
@@ -384,7 +410,7 @@ function parseContactFromSignature(senderName,senderEmail,signatureText){
   const senderLooksHuman=looksLikePersonName(senderName||"");
   const resolvedName=senderLooksHuman?senderName:(inferred||senderName||"");
   const site=website(sig,senderEmail);
-  return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig),email:senderEmail||""},phones(sig),{businessHomePage:site},address(sig),{signature:sig,personalNotes:sig});
+  return Object.assign({},nameParts(resolvedName),{companyName:company(sig,resolvedName,senderEmail,site),jobTitle:title(sig,resolvedName),email:senderEmail||""},phones(sig),{businessHomePage:site},address(sig),{signature:sig,personalNotes:sig});
 }
 
 function sameEmail(a,b){return cleanEmail(a)&&cleanEmail(a)===cleanEmail(b)}
@@ -515,13 +541,15 @@ function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
     let emailLocal=chunk.findIndex(l=>cleanEmail(l)===email);
     if(emailLocal<0)emailLocal=chunk.length-1;
     let nameLocal=-1;
-    for(let j=emailLocal-1;j>=Math.max(0,emailLocal-8);j--){if(looksLikePersonName(chunk[j])){nameLocal=j;break}}
+    for(let j=emailLocal-1;j>=Math.max(0,emailLocal-8);j--){if(personNameFromLine(chunk[j])){nameLocal=j;break}}
     if(nameLocal>=0)chunk=chunk.slice(nameLocal);
     else{
       while(chunk.length>5 && signatureScore(chunk[0])===0)chunk.shift();
     }
     while(chunk.length>5 && signatureScore(chunk[chunk.length-1])===0 && signatureScore(chunk[chunk.length-2])===0)chunk.pop();
-    const sig=cleanSignatureText(chunk.join("\n"));
+    let sig=cleanSignatureText(chunk.join("\n"));
+    const tightened=isolateSignature(sig,email);
+    if(tightened)sig=cleanSignatureText(tightened);
     const score=norm(sig).split("\n").reduce((t,l)=>t+signatureScore(l),0);
     if(score<5)continue;
     const inferred=inferAnchoredName(sig,email);
@@ -570,7 +598,7 @@ function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
         !!(addr.state&&addr.postalCode),
         !!site,
         !!company(sig,currentName||legacy.name,legacy.email,site),
-        !!title(sig)
+        !!title(sig,currentName||legacy.name)
       ].filter(Boolean).length;
       // Require a genuinely signature-like block, but trust Outlook for who the current
       // sender is. This keeps the safety check without rejecting signatures lacking email.
@@ -690,7 +718,8 @@ function htmlSignatureCandidates(html,currentName,currentEmail,myEmail){
       if(!email||sameEmail(email,myEmail))continue;
       const best=findBestHtmlSignatureContainer(a,email);
       if(!best||best.score<7)continue;
-      const sig=cleanSignatureText(best.text);
+      const isolated=isolateSignature(best.text,email);
+      const sig=cleanSignatureText(isolated||best.text);
       const inferred=inferAnchoredName(sig,email);
       const name=(sameEmail(email,currentEmail)&&looksLikePersonName(currentName||""))?currentName:(inferred||email.split("@")[0]);
       const parsed=parseContactFromSignature(name,email,sig);
@@ -738,7 +767,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.6.6 — stricter image-signature OCR classification.
+// v2.6.7 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
