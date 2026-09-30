@@ -149,17 +149,13 @@ function isClosingPhrase(line){
 function signatureNameFromLine(line){
   const raw=String(line||"").replace(/\s+/g," ").trim();
   if(!raw||isClosingPhrase(raw))return "";
-  // Never mine a name prefix out of an address, phone, email or URL line.
   if(/\d|@|https?:|www\.|\b(?:street|st\.?|road|rd\.?|ave\.?|avenue|blvd\.?|boulevard|suite|ste\.?|drive|dr\.?|lane|ln\.?|loop|way|court|ct\.?|place|pl\.?)\b/i.test(raw))return "";
-  if(looksLikePersonName(raw))return raw;
-  const words=raw.split(/\s+/).filter(Boolean);
-  for(let n=2;n<=Math.min(4,words.length);n++){
-    const prefix=words.slice(0,n).join(" ");
-    if(looksLikePersonName(prefix))return prefix;
-  }
-  return "";
+  if(/^(?:wire transfer|payment options?|please\b|good (?:morning|afternoon|evening)\b|see attached\b|attached\b|invoice\b|message\b|hello\b|hi\b)/i.test(raw))return "";
+  if(/[!?]$/.test(raw))return "";
+  const split=splitNameTitleLine(raw);
+  if(split&&split.name)return split.name;
+  return looksLikePersonName(raw)?raw:"";
 }
-
 function splitNameTitleLine(line){
   const raw=String(line||"").replace(/\s+/g," ").trim();
   if(!raw || isClosingPhrase(raw))return null;
@@ -1012,26 +1008,69 @@ function nameMatchesIdentity(line,identityName){
   const ap=a.split(/\s+/).filter(Boolean),bp=b.split(/\s+/).filter(Boolean);
   return ap.length>=2&&bp.length>=2&&ap[ap.length-1]===bp[bp.length-1];
 }
+
+function authoritativeSignatureStart(lines,j,identityName){
+  const parts=nameParts(identityName||"");
+  const surname=String(parts.surname||"").toLowerCase();
+  const line=String(lines[j]||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim();
+  if(!line)return -1;
+
+  const split=splitNameTitleLine(line);
+  if(split&&split.name){
+    const sp=nameParts(split.name);
+    if(!surname||String(sp.surname||"").toLowerCase()===surname)return j;
+  }
+  if(looksLikePersonName(line)){
+    const p=nameParts(line);
+    if(!surname||String(p.surname||"").toLowerCase()===surname)return j;
+  }
+
+  if(surname){
+    const next=String(lines[j+1]||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim();
+    if(/^[A-Za-z][A-Za-z'.-]*$/.test(line)&&next.toLowerCase().startsWith(surname+" ")){
+      const rem=next.slice(parts.surname.length).trim();
+      if(TITLE_WORDS.some(t=>rem.toLowerCase().includes(t))||rem.endsWith("&"))return j;
+    }
+    const low=line.toLowerCase();
+    if(low.startsWith(surname+" ")){
+      const rem=line.slice(parts.surname.length).trim();
+      if(TITLE_WORDS.some(t=>rem.toLowerCase().includes(t))||rem.endsWith("&")){
+        const prev=String(lines[j-1]||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim();
+        if(/^[A-Za-z][A-Za-z'.-]*$/.test(prev))return j-1;
+        return j;
+      }
+    }
+  }
+  return -1;
+}
+
 function boundedSignatureAtEmail(lines,emailIndex,identityName,identityEmail){
   const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
   const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
   let start=-1;
   for(let j=emailIndex-1;j>=Math.max(0,emailIndex-12);j--){
-    const v=String(lines[j]||"").trim();if(isHeader(v)||isDisclaimer(v))break;if(!v||isClosingPhrase(v))continue;
-    if(nameMatchesIdentity(v,identityName)||signatureNameFromLine(v)){start=j;break}
+    const v=String(lines[j]||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim();
+    if(isHeader(v)||isDisclaimer(v))break;
+    if(!v)continue;
+    const a=authoritativeSignatureStart(lines,j,identityName);
+    if(a>=0){start=a;break}
+    if(isClosingPhrase(v))break;
+    const generic=signatureNameFromLine(v);
+    if(generic){start=j;break}
   }
   if(start<0)return null;
   let end=emailIndex;
   for(let j=emailIndex+1;j<Math.min(lines.length,emailIndex+5);j++){
-    const v=String(lines[j]||"").trim();
+    const v=String(lines[j]||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim();
     if(!v||isHeader(v)||isDisclaimer(v)||isClosingPhrase(v))break;
     if(cleanEmail(v)&&!sameEmail(cleanEmail(v),identityEmail))break;
-    if(signatureNameFromLine(v))break;
+    if(authoritativeSignatureStart(lines,j,identityName)>=0||signatureNameFromLine(v))break;
     if(/^https?:|^www\./i.test(v)||signatureScore(v)>0){end=j;continue}
     break;
   }
-  const raw=lines.slice(start,end+1).map(x=>String(x||"").trim()).filter(Boolean);
-  const sig=cleanSignatureText(raw.join("\n"));if(!sig||signatureEvidenceScore(raw)<5)return null;
+  const raw=lines.slice(start,end+1).map(x=>String(x||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim()).filter(Boolean);
+  const sig=cleanSignatureText(raw.join("\n"));
+  if(!sig||signatureEvidenceScore(raw)<5)return null;
   return {start,end,sig};
 }
 function boundedSignatureAtName(lines,nameIndex,identityName,identityEmail){
@@ -1337,7 +1376,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.8.1 — stricter image-signature OCR classification.
+// v2.8.2 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -1865,14 +1904,21 @@ async function scan(){try{
   status("Reading the current email chain…");$("reviewSection").hidden=true;
   const item=Office.context.mailbox.item;if(!item||item.itemType!==Office.MailboxEnums.ItemType.Message)throw new Error("Open or select an email message first.");
   const from=item.from||{},body=await readBody(item);const myEmail=(Office.context.mailbox.userProfile?.emailAddress||"").toLowerCase();
-  candidates=allPhysicalSignatureCandidates(body.text||body.plainText||"",from.displayName||"",from.emailAddress||"",myEmail);
-  if(!candidates.length&&body.html){const htmlVisible=htmlBodyToText(body.html);candidates=allPhysicalSignatureCandidates(htmlVisible,from.displayName||"",from.emailAddress||"",myEmail)}
+  const textCandidates=allPhysicalSignatureCandidates(body.text||body.plainText||"",from.displayName||"",from.emailAddress||"",myEmail);
+  const htmlVisible=body.html?htmlBodyToText(body.html):"";
+  const htmlCandidates=htmlVisible?allPhysicalSignatureCandidates(htmlVisible,from.displayName||"",from.emailAddress||"",myEmail):[];
+  const totalLines=xs=>xs.reduce((n,c)=>n+norm(c?.parsed?.signature||"").split("\n").filter(Boolean).length,0);
+  if(htmlCandidates.length>textCandidates.length)candidates=htmlCandidates;
+  else if(textCandidates.length>htmlCandidates.length)candidates=textCandidates;
+  else if(htmlCandidates.length&&totalLines(htmlCandidates)<totalLines(textCandidates))candidates=htmlCandidates;
+  else candidates=textCandidates;
   if(!candidates.length){try{const ocr=await imageSignatureCandidate(item,body.html||"",from.displayName||"",from.emailAddress||"",myEmail);if(ocr)candidates=[ocr]}catch(ocrErr){console.warn("Image signature OCR fallback failed",ocrErr)}}
   candidates=candidates.map(c=>{if(!c?.parsed)return c;const identity=c.name||[c.parsed.givenName,c.parsed.middleName,c.parsed.surname].filter(Boolean).join(" ");c.parsed.jobTitle=sanitizeJobTitle(c.parsed.jobTitle,identity,c.parsed.signature||"");c.parsed.personalNotes=c.parsed.signature||"";return c});
   renderCandidates();status(`Found ${candidates.length} signature block${candidates.length===1?"":"s"}. Select one signature block to process. Your own messages/signature are ignored.`,candidates.length?"ok":"error")
 }catch(e){status(e.message||String(e),"error")}}
-function clientId(){return localStorage.getItem("ccfe_client_id")||""}
-function showAuthSetup(){const id=clientId();$("authSetup").hidden=!!id;$("clientId").value=id}
+const APP_CLIENT_ID="aaaad2a2-1ca4-4d45-8b8d-21c56f2c4137";
+function clientId(){return APP_CLIENT_ID}
+function showAuthSetup(){$("authSetup").hidden=true;$("clientId").value=APP_CLIENT_ID}
 async function initMsal(){const id=clientId();if(!id)throw new Error("Microsoft Contacts access is not configured yet. Enter the Application (client) ID first.");if(!msalInstance){msalInstance=await createNestablePublicClientApplication({auth:{clientId:id,authority:"https://login.microsoftonline.com/common"},cache:{cacheLocation:"localStorage"}})}return msalInstance}
 async function accessToken(){const pca=await initMsal();const request={scopes:GRAPH_SCOPES,loginHint:Office.context.mailbox.userProfile.emailAddress};try{return (await pca.acquireTokenSilent(request)).accessToken}catch(err){if(err instanceof InteractionRequiredAuthError || /interaction|consent|login/i.test(String(err?.errorCode||err?.message||err))){return (await pca.acquireTokenPopup(request)).accessToken}throw err}}
 async function graph(path,opts={}){const token=await accessToken();const r=await fetch("https://graph.microsoft.com/v1.0"+path,{...opts,headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json",...(opts.headers||{})}});if(!r.ok){const t=await r.text();throw new Error(`Microsoft Contacts error ${r.status}: ${t.slice(0,350)}`)}if(r.status===204)return null;return r.json()}
@@ -1952,7 +1998,7 @@ async function compareSelected(){try{
   if(!clientId()){showAuthSetup();throw new Error("Complete the one-time Microsoft Contacts setup first.")}
   status("Signing in to Microsoft and checking Outlook Contacts…");graphContacts=await loadContacts();const items=selected.map(c=>({...c,match:matchContact(c.parsed)}));window.__reviewItems=items;renderReviews(items);status(`Compared the selected signature with ${graphContacts.length} Outlook contact${graphContacts.length===1?"":"s"}.`,"ok")
 }catch(e){status(e.message||String(e),"error")}}
-Office.onReady(async info=>{if(info.host!==Office.HostType.Outlook){status("This page must be opened from the Outlook add-in.","error");return}showAuthSetup();$("saveClientId").addEventListener("click",()=>{const id=$("clientId").value.trim();if(!/^[0-9a-f-]{36}$/i.test(id)){status("That does not look like a Microsoft Application (client) ID.","error");return}localStorage.setItem("ccfe_client_id",id);msalInstance=null;showAuthSetup();status("Client ID saved. You can now compare contacts.","ok")});$("selectAll").addEventListener("click",()=>document.querySelectorAll("input[data-candidate]").forEach(x=>x.checked=false));$("scanAgain").addEventListener("click",scan);$("compareSelected").addEventListener("click",compareSelected);await scan()});
+Office.onReady(async info=>{if(info.host!==Office.HostType.Outlook){status("This page must be opened from the Outlook add-in.","error");return}showAuthSetup();$("saveClientId").addEventListener("click",()=>showAuthSetup());$("selectAll").addEventListener("click",()=>document.querySelectorAll("input[data-candidate]").forEach(x=>x.checked=false));$("scanAgain").addEventListener("click",scan);$("compareSelected").addEventListener("click",compareSelected);await scan()});
 
 
 
