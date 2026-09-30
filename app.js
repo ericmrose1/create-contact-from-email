@@ -700,12 +700,19 @@ function parseContact(senderName,senderEmail,segmentText){
 }
 function sameEmail(a,b){return cleanEmail(a)&&cleanEmail(a)===cleanEmail(b)}
 function cleanSignatureText(sig){
-  let lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean).filter(line=>{
-    if(/^(?:https?:\/\/)?[^\s]+\.(?:png|jpe?g|gif|svg|webp|bmp|ico)(?:[?#].*)?$/i.test(line))return false;
-    if(/^cid:|^data:image/i.test(line))return false;
-    if(/(?:google\.[^/]+\/maps|maps\.google\.|maps\.apple\.|bing\.com\/maps|goo\.gl\/maps|safelinks\.protection\.outlook\.com|urldefense\.proofpoint\.com\/v2\/url\?)/i.test(line))return false;
-    return true;
-  });
+  const cleanLine=line=>{
+    let v=String(line||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim();
+    if(!v)return "";
+    if(/^(?:https?:\/\/)?[^\s]+\.(?:png|jpe?g|gif|svg|webp|bmp|ico)(?:[?#].*)?$/i.test(v))return "";
+    if(/^cid:|^data:image/i.test(v))return "";
+    v=v.replace(/<https?:\/\/[^>]*(?:urldefense\.proofpoint\.com|safelinks\.protection\.outlook\.com)[^>]*>/ig," ");
+    v=v.replace(/https?:\/\/[^\s]*(?:urldefense\.proofpoint\.com|safelinks\.protection\.outlook\.com)[^\s]*/ig," ");
+    v=v.replace(/<mailto:[^>]+>/ig," ");
+    v=v.replace(/\s+/g," ").trim();
+    if(/(?:google\.[^/]+\/maps|maps\.google\.|maps\.apple\.|bing\.com\/maps|goo\.gl\/maps)/i.test(v)&&!cleanEmail(v))return "";
+    return v;
+  };
+  let lines=norm(sig).split("\n").map(cleanLine).filter(Boolean);
   while(lines.length&&isClosingPhrase(lines[0]))lines.shift();
   return lines.join("\n");
 }
@@ -966,20 +973,139 @@ function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
   }));
 }
 
+
+function allMessageSegments(body,currentName,currentEmail){
+  const lines=norm(body).split("\n");
+  const headers=[];
+  for(let i=0;i<lines.length;i++){
+    const m=lines[i].match(/^\s*From:\s*(.+)$/i);
+    if(!m)continue;
+    const id=headerIdentity(m[1]);
+    if(id.email||id.name)headers.push({i,name:id.name,email:cleanEmail(id.email)});
+  }
+  const segments=[];
+  const firstHeader=headers.length?headers[0].i:lines.length;
+  segments.push({start:0,end:firstHeader-1,name:cleanName(currentName||""),email:cleanEmail(currentEmail),authoritative:true,text:lines.slice(0,firstHeader).join("\n")});
+  for(let h=0;h<headers.length;h++){
+    const a=headers[h],b=headers[h+1]?headers[h+1].i:lines.length;
+    segments.push({start:a.i+1,end:b-1,name:cleanName(a.name||""),email:cleanEmail(a.email),authoritative:true,text:lines.slice(a.i+1,b).join("\n")});
+  }
+  return segments;
+}
+function signatureEvidenceScore(lines){
+  const text=lines.join("\n");let score=0;
+  if(cleanEmail(text))score+=4;
+  if(/\b(?:office|direct|mobile|cell|fax|tel|phone)\b/i.test(text)||/\d{3}[\s.\-]\d{3}[\s.\-]\d{4}/.test(text))score+=3;
+  if(/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(text))score+=3;
+  if(/\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|loop|suite|ste\.?)\b/i.test(text))score+=2;
+  if(/https?:\/\/|www\./i.test(text))score+=2;
+  if(TITLE_WORDS.some(t=>text.toLowerCase().includes(t)))score+=2;
+  if(COMPANY_WORDS.some(w=>(" "+text.toLowerCase()).includes(w)))score+=1;
+  return score;
+}
+function nameMatchesIdentity(line,identityName){
+  const raw=cleanName(signatureNameFromLine(line)||personNameFromLine(line)||"");
+  const wanted=cleanName(identityName||"");
+  if(!raw||!wanted)return false;
+  const key=v=>String(v||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+  const a=key(raw),b=key(wanted);if(a===b)return true;
+  const ap=a.split(/\s+/).filter(Boolean),bp=b.split(/\s+/).filter(Boolean);
+  return ap.length>=2&&bp.length>=2&&ap[ap.length-1]===bp[bp.length-1];
+}
+function boundedSignatureAtEmail(lines,emailIndex,identityName,identityEmail){
+  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
+  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
+  let start=-1;
+  for(let j=emailIndex-1;j>=Math.max(0,emailIndex-12);j--){
+    const v=String(lines[j]||"").trim();if(isHeader(v)||isDisclaimer(v))break;if(!v||isClosingPhrase(v))continue;
+    if(nameMatchesIdentity(v,identityName)||signatureNameFromLine(v)){start=j;break}
+  }
+  if(start<0)return null;
+  let end=emailIndex;
+  for(let j=emailIndex+1;j<Math.min(lines.length,emailIndex+5);j++){
+    const v=String(lines[j]||"").trim();
+    if(!v||isHeader(v)||isDisclaimer(v)||isClosingPhrase(v))break;
+    if(cleanEmail(v)&&!sameEmail(cleanEmail(v),identityEmail))break;
+    if(signatureNameFromLine(v))break;
+    if(/^https?:|^www\./i.test(v)||signatureScore(v)>0){end=j;continue}
+    break;
+  }
+  const raw=lines.slice(start,end+1).map(x=>String(x||"").trim()).filter(Boolean);
+  const sig=cleanSignatureText(raw.join("\n"));if(!sig||signatureEvidenceScore(raw)<5)return null;
+  return {start,end,sig};
+}
+function boundedSignatureAtName(lines,nameIndex,identityName,identityEmail){
+  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
+  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
+  const raw=[];
+  for(let j=nameIndex;j<Math.min(lines.length,nameIndex+14);j++){
+    const v=String(lines[j]||"").trim();
+    if(j>nameIndex&&(isHeader(v)||isDisclaimer(v)))break;
+    if(!v){if(raw.length>=4)break;continue}
+    if(j>nameIndex&&isClosingPhrase(v))break;
+    if(j>nameIndex&&nameMatchesIdentity(v,identityName))break;
+    raw.push(v);
+    if(raw.length>=4&&signatureEvidenceScore(raw)>=7){
+      const hasTerminal=raw.some(x=>sameEmail(cleanEmail(x),identityEmail))||raw.some(x=>/^https?:|^www\./i.test(x))||raw.some(x=>/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(x));
+      if(hasTerminal&&raw.length>=5)break;
+    }
+  }
+  const sig=cleanSignatureText(raw.join("\n"));if(!sig||signatureEvidenceScore(raw)<5)return null;
+  return {start:nameIndex,end:nameIndex+raw.length-1,sig};
+}
+function signatureOccurrencesInSegment(segment,myEmail){
+  const identityEmail=cleanEmail(segment.email),identityName=cleanName(segment.name||"");
+  if(identityEmail&&sameEmail(identityEmail,myEmail))return [];
+  const lines=norm(segment.text||"").split("\n"),out=[],used=[];
+  const overlaps=(a,b)=>used.some(r=>!(b<r.start||a>r.end));
+  const add=(block,source)=>{
+    if(!block||overlaps(block.start,block.end))return;
+    const parsed=parseContactFromSignature(identityName,identityEmail,block.sig);
+    if(identityName&&looksLikePersonName(identityName)){const np=nameParts(identityName);parsed.givenName=np.givenName;parsed.middleName=np.middleName;parsed.surname=np.surname}
+    parsed.email=identityEmail||cleanEmail(parsed.email);parsed.jobTitle=sanitizeJobTitle(parsed.jobTitle,identityName||[parsed.givenName,parsed.surname].filter(Boolean).join(" "),block.sig);parsed.signature=block.sig;parsed.personalNotes=block.sig;parsed._debug={source,physicalOccurrence:true};
+    used.push({start:block.start,end:block.end});
+    out.push({score:100,name:identityName||inferPersonName(block.sig),email:identityEmail||cleanEmail(parsed.email),text:block.sig,parsed,physicalOccurrence:true,occurrenceKey:`segment:${segment.start}:${block.start}:${block.end}`,localStart:block.start,localEnd:block.end});
+  };
+  if(identityEmail){for(let i=0;i<lines.length;i++)if(sameEmail(cleanEmail(lines[i]),identityEmail))add(boundedSignatureAtEmail(lines,i,identityName,identityEmail),"Physical signature occurrence — email anchor")}
+  if(identityName){for(let i=0;i<lines.length;i++)if(nameMatchesIdentity(lines[i],identityName))add(boundedSignatureAtName(lines,i,identityName,identityEmail),"Physical signature occurrence — name anchor")}
+  return out;
+}
+function genericPhysicalSignatureOccurrences(body,myEmail,claimedGlobalRanges){
+  const lines=norm(body).split("\n");const out=[];const claimed=claimedGlobalRanges||[];
+  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
+  const isClaimed=(a,b)=>claimed.some(r=>!(b<r.start||a>r.end));
+  for(let i=0;i<lines.length;i++){
+    if(isHeader(lines[i]))continue;const email=cleanEmail(lines[i]);if(!email||sameEmail(email,myEmail))continue;
+    let name="",start=-1;for(let j=i-1;j>=Math.max(0,i-12);j--){if(isHeader(lines[j]))break;const n=signatureNameFromLine(lines[j])||personNameFromLine(lines[j]);if(n&&!isClosingPhrase(lines[j])){name=n;start=j;break}}
+    if(start<0)continue;const block=boundedSignatureAtEmail(lines,i,name,email);if(!block||isClaimed(block.start,block.end))continue;
+    const parsed=parseContactFromSignature(name,email,block.sig);parsed.signature=block.sig;parsed.personalNotes=block.sig;parsed.jobTitle=sanitizeJobTitle(parsed.jobTitle,name,block.sig);
+    out.push({score:60,name,email,text:block.sig,parsed,physicalOccurrence:true,occurrenceKey:`generic:${block.start}:${block.end}`,globalStart:block.start,globalEnd:block.end});claimed.push({start:block.start,end:block.end});
+  }
+  return out;
+}
+function allPhysicalSignatureCandidates(body,currentName,currentEmail,myEmail){
+  const segments=allMessageSegments(body,currentName,currentEmail),out=[],ranges=[];
+  for(const seg of segments){
+    for(const c of signatureOccurrencesInSegment(seg,myEmail)){
+      c.globalStart=seg.start+(c.localStart||0);c.globalEnd=seg.start+(c.localEnd||0);ranges.push({start:c.globalStart,end:c.globalEnd});out.push(c);
+    }
+  }
+  out.push(...genericPhysicalSignatureOccurrences(body,myEmail,ranges));
+  out.sort((a,b)=>(a.globalStart??0)-(b.globalStart??0));
+  return out;
+}
+function candidateOccurrenceLabels(items){
+  const totals=new Map();for(const c of items){const k=cleanEmail(c.email)||String(c.name||"").toLowerCase();totals.set(k,(totals.get(k)||0)+1)}
+  const seen=new Map();return items.map(c=>{const k=cleanEmail(c.email)||String(c.name||"").toLowerCase();const n=(seen.get(k)||0)+1;seen.set(k,n);return{n,total:totals.get(k)||1}});
+}
+
 function renderCandidates(){
-  const box=$("candidates");box.innerHTML="";
-  const totals=new Map();
-  for(const c of candidates){const k=cleanEmail(c.email)||String(c.name||"");totals.set(k,(totals.get(k)||0)+1)}
-  const seen=new Map();
+  const box=$("candidates");box.innerHTML="";const labels=candidateOccurrenceLabels(candidates);
   candidates.forEach((c,i)=>{
-    const k=cleanEmail(c.email)||String(c.name||"");
-    const n=(seen.get(k)||0)+1;seen.set(k,n);
-    const total=totals.get(k)||1;
-    const occ=total>1?`<div class="muted">Signature ${n} of ${total} — choose the one you want to use</div>`:"";
-    const checked=candidateDefaultChecked(total,n-1)?" checked":"";
+    const lab=labels[i];const occ=lab.total>1?`<div class="muted">Signature occurrence ${lab.n} of ${lab.total}</div>`:`<div class="muted">Signature occurrence</div>`;
     const el=document.createElement("div");el.className="candidate";
-    el.innerHTML=`<div class="candidate-head"><input type="checkbox" data-candidate="${i}"${checked}><div><div class="candidate-name">${html(c.name||"Unknown sender")}</div><div class="muted">${html(c.email||"No email found")}</div>${occ}</div></div><div class="preview">${html(c.parsed.signature||"No signature block confidently found")}</div>`;
-    box.appendChild(el)
+    el.innerHTML=`<div class="candidate-head"><input type="checkbox" data-candidate="${i}"><div><div class="candidate-name">${html(c.name||"Unknown sender")}</div><div class="muted">${html(c.email||"No email found")}</div>${occ}</div></div><div class="preview">${html(c.parsed.signature||"No signature block confidently found")}</div>`;
+    const cb=el.querySelector('input[data-candidate]');cb.addEventListener("change",()=>{if(!cb.checked)return;document.querySelectorAll('input[data-candidate]').forEach(x=>{if(x!==cb)x.checked=false})});box.appendChild(el)
   });
   $("candidateSection").hidden=false
 }
@@ -1211,7 +1337,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.7.5 — stricter image-signature OCR classification.
+// v2.8.0 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -1547,6 +1673,126 @@ function chooseOccurrenceCandidates(textCandidates,htmlTextCandidates){
 }
 
 
+
+function lineHasPhone(line,phone){
+  const target=phoneForOutlook(phone||"").replace(/\D/g,"").slice(-10);
+  if(!target)return false;
+  return String(line||"").replace(/\D/g,"").includes(target);
+}
+
+function looseSignatureOccurrences(text,base){
+  const p=base?.parsed||base||{};
+  const name=base?.name||[p.givenName,p.middleName,p.surname].filter(Boolean).join(" ");
+  const np=nameParts(name||"");
+  const surname=String(np.surname||p.surname||"").trim();
+  const email=cleanEmail(base?.email||p.email||"");
+  if(!surname)return [];
+  const lines=norm(text||"").split("\n").map(x=>String(x||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim());
+  const esc=surname.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  const surnameRx=new RegExp(`(?:^|\\s)${esc}(?:$|\\s|[,|•·—–-])`,`i`);
+  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
+  const out=[];
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    if(!line||isHeader(line)||isClosingPhrase(line)||!surnameRx.test(line))continue;
+    const max=Math.min(lines.length-1,i+14);
+    let score=0,emailAt=-1,lastEvidence=i;
+    let sawBusiness=false,sawMobile=false,sawZip=false,sawStreet=false,sawTitle=false;
+    for(let j=i;j<=max;j++){
+      const v=lines[j];
+      if(j>i&&isHeader(v))break;
+      if(j>i&&surnameRx.test(v))break;
+      if(email&&String(v).toLowerCase().includes(email)){score+=4;emailAt=j;lastEvidence=j}
+      if(!sawBusiness&&p.businessPhone&&lineHasPhone(v,p.businessPhone)){score+=2;sawBusiness=true;lastEvidence=j}
+      if(!sawMobile&&p.mobilePhone&&lineHasPhone(v,p.mobilePhone)){score+=2;sawMobile=true;lastEvidence=j}
+      if(!sawZip&&p.postalCode&&String(v).includes(String(p.postalCode))){score+=1;sawZip=true;lastEvidence=j}
+      if(!sawStreet&&p.street){
+        const first=String(p.street).toLowerCase().split(/\s+/).filter(Boolean).slice(0,2).join(" ");
+        if(first&&String(v).toLowerCase().includes(first)){score+=1;sawStreet=true;lastEvidence=j}
+      }
+      if(!sawTitle&&p.jobTitle){
+        const words=String(p.jobTitle).toLowerCase().split(/[^a-z0-9]+/).filter(w=>w.length>3);
+        const hits=words.filter(w=>String(v).toLowerCase().includes(w)).length;
+        if(hits>=Math.min(2,words.length)){score+=2;sawTitle=true;lastEvidence=j}
+      }
+    }
+    if(score<5)continue;
+    let start=i;
+    if(i>0&&/^[A-Za-z][A-Za-z'.-]*$/.test(lines[i-1])&&!isClosingPhrase(lines[i-1]))start=i-1;
+    let end=Math.max(lastEvidence,emailAt>=0?emailAt:i);
+    for(let j=end+1;j<=Math.min(lines.length-1,end+2);j++){
+      const v=lines[j];
+      if(!v||isHeader(v)||surnameRx.test(v))break;
+      if(email&&String(v).toLowerCase().includes(email)){end=j;continue}
+      if(/^https?:|^www\./i.test(v)){end=j;continue}
+      break;
+    }
+    const sig=cleanSignatureText(lines.slice(start,end+1).filter(Boolean).join("\n"));
+    if(!sig)continue;
+    if(out.length&&start<=out[out.length-1].end)continue;
+    out.push({sig,start,end,occurrence:out.length,score:200+score});
+    i=end;
+  }
+  return out;
+}
+
+function canonicalNotesFromParsed(p,identityName=""){
+  const lines=[];
+  const name=cleanName(identityName||[p.givenName,p.middleName,p.surname].filter(Boolean).join(" "));
+  if(name)lines.push(name);
+  if(p.jobTitle)lines.push(p.jobTitle);
+  if(p.companyName)lines.push(p.companyName);
+  if(p.street)lines.push(p.street);
+  const cityLine=[p.city,[p.state,p.postalCode].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+  if(cityLine)lines.push(cityLine);
+  if(p.businessPhone)lines.push(`Office: ${phoneForOutlook(p.businessPhone)}`);
+  if(p.mobilePhone)lines.push(`Mobile: ${phoneForOutlook(p.mobilePhone)}`);
+  if(p.businessFax)lines.push(`Fax: ${phoneForOutlook(p.businessFax)}`);
+  if(p.email)lines.push(cleanEmail(p.email));
+  if(p.businessHomePage)lines.push(p.businessHomePage);
+  return lines.filter(Boolean).join("\n");
+}
+
+function safeNotesSignature(raw,p,identityName=""){
+  const cleaned=cleanSignatureText(raw||"");
+  const lines=norm(cleaned).split("\n").map(x=>x.trim()).filter(Boolean);
+  const bodyNoise=/\b(?:good afternoon|good morning|good evening|please see attached|payment options?|remitted|wire transfer|customer id|billing zip|please reach out|attached invoices?)\b/i;
+  const hasHeader=/^(?:from|sent|to|cc|bcc|subject):/im.test(cleaned);
+  const plausible=cleaned&&lines.length>=2&&lines.length<=12&&!bodyNoise.test(cleaned)&&!hasHeader;
+  if(plausible)return cleaned;
+  return canonicalNotesFromParsed(p,identityName);
+}
+
+function enforceDuplicateMultiplicity(input,plainText,htmlVisible){
+  const groups=new Map();
+  for(const c of input||[]){
+    const key=cleanEmail(c.email||c.parsed?.email)||`name:${String(c.name||"").toLowerCase()}`;
+    if(!groups.has(key))groups.set(key,[]);
+    groups.get(key).push(c);
+  }
+  const out=[];
+  for(const group of groups.values()){
+    const base=group[0];
+    const textLoose=looseSignatureOccurrences(plainText||"",base);
+    const htmlLoose=looseSignatureOccurrences(htmlVisible||"",base);
+    const occs=htmlLoose.length>textLoose.length?htmlLoose:textLoose;
+    const wanted=Math.max(group.length,occs.length);
+    if(wanted<=group.length){out.push(...group);continue}
+    out.push(...group);
+    for(let i=group.length;i<wanted;i++){
+      const occ=occs[i]||occs[0];
+      const clone=JSON.parse(JSON.stringify(base));
+      clone.occurrence=i;
+      clone.occurrenceKey=`fingerprint:${cleanEmail(base.email||base.parsed?.email)}:${i}:${occ?.start??i}:${occ?.end??i}`;
+      clone.duplicateTotal=wanted;
+      if(occ?.sig){clone.text=occ.sig;clone.parsed.signature=occ.sig;clone.parsed.personalNotes=occ.sig}
+      clone.parsed._debug={...(clone.parsed._debug||{}),source:"Fingerprint duplicate occurrence fallback",occurrence:i};
+      out.push(clone);
+    }
+  }
+  return out;
+}
+
 function candidateDefaultChecked(total,index){
   // Unique contacts stay selected as before. Duplicate signature occurrences require an explicit user choice.
   return total<=1;
@@ -1606,142 +1852,32 @@ function expandCandidatesByBodyOccurrences(input,plainText,htmlVisible){
 function finalizeCandidate(c){
   if(!c||!c.parsed)return c;
   const p=c.parsed;
-  p.jobTitle=sanitizeJobTitle(p.jobTitle,c.name||[p.givenName,p.surname].filter(Boolean).join(" "),p.signature||"");
-  const tight=tightNotesSignature(p.signature||c.text||"",c.name||[p.givenName,p.surname].filter(Boolean).join(" "),p.email||c.email||"");
+  const identity=c.name||[p.givenName,p.middleName,p.surname].filter(Boolean).join(" ");
+  p.jobTitle=sanitizeJobTitle(p.jobTitle,identity,p.signature||"");
+  let tight=tightNotesSignature(p.signature||c.text||"",identity,p.email||c.email||"");
+  tight=safeNotesSignature(tight,p,identity);
   p.signature=tight;
   p.personalNotes=tight;
   c.text=tight;
   return c;
 }
-
 async function scan(){try{
   status("Reading the current email chain…");$("reviewSection").hidden=true;
   const item=Office.context.mailbox.item;if(!item||item.itemType!==Office.MailboxEnums.ItemType.Message)throw new Error("Open or select an email message first.");
-  const from=item.from||{},body=await readBody(item);
-  const myEmail=(Office.context.mailbox.userProfile?.emailAddress||"").toLowerCase();
-
-  const textOccurrenceCandidates=plainTextOccurrenceCandidates(body.text,from.displayName||"",from.emailAddress||"",myEmail);
-  const htmlVisible=body.html?htmlBodyToText(body.html):"";
-  const htmlTextOccurrenceCandidates=htmlVisible?plainTextOccurrenceCandidates(htmlVisible,from.displayName||"",from.emailAddress||"",myEmail):[];
-  const htmlMailtoCandidates=body.html?htmlMailtoOccurrenceCandidates(body.html,body.text,from.displayName||"",from.emailAddress||"",myEmail):[];
-  let occurrenceCandidates=chooseOccurrenceCandidates(textOccurrenceCandidates,htmlTextOccurrenceCandidates);
-  if(htmlMailtoCandidates.length>occurrenceCandidates.length)occurrenceCandidates=htmlMailtoCandidates;
-  const occurrenceEmails=new Set(occurrenceCandidates.map(c=>cleanEmail(c.email)).filter(Boolean));
-
-  // HTML and legacy text parsing are now fallback paths only. If Outlook Text yielded one
-  // or more tightly bounded signature occurrences for an email address, those occurrences
-  // are authoritative and HTML cannot replace their Notes, title, identity, or count.
-  const htmlCandidates=(body.html?htmlSignatureCandidates(body.html,from.displayName||"",from.emailAddress||"",myEmail):[])
-    .filter(c=>!occurrenceEmails.has(cleanEmail(c.email)));
-  const textCandidates=anchoredSignatureCandidates(body.text,from.displayName||"",from.emailAddress||"",myEmail)
-    .filter(c=>!occurrenceEmails.has(cleanEmail(c.email)));
-
-  const merged=new Map();
-  const htmlMap=new Map(htmlCandidates.map(c=>[cleanEmail(c.email),c]));
-  const textMap=new Map(textCandidates.map(c=>[cleanEmail(c.email),c]));
-  const keys=new Set([...htmlMap.keys(),...textMap.keys()]);
-  for(const key of keys){
-    const combined=mergeCandidatePair(htmlMap.get(key),textMap.get(key));
-    if(combined)merged.set(key,combined);
-  }
-
-  candidates=[...occurrenceCandidates,...merged.values()].map(finalizeCandidate);
-  candidates=expandCandidatesByBodyOccurrences(candidates,body.text,htmlVisible).map(finalizeCandidate);
-
-  try{
-    const currentEmail=String(from.emailAddress||"").toLowerCase();
-    const currentName=cleanName(from.displayName||"");
-    const current=candidates.find(c=>sameEmail(c.email,currentEmail));
-    const sig=String(current?.parsed?.signature||"");
-    const inferred=cleanName(inferPersonName(sig)).toLowerCase();
-    const hasIdentity=!!current&&((currentEmail&&sig.toLowerCase().includes(currentEmail))||(currentName&&inferred===currentName.toLowerCase()));
-    if(!hasIdentity){
-      const ocr=await imageSignatureCandidate(item,body.html||"",from.displayName||"",from.emailAddress||"",myEmail);
-      if(ocr){candidates=candidates.filter(c=>!sameEmail(c.email,currentEmail));candidates.unshift(ocr)}
-    }
-  }catch(ocrErr){console.warn("Image signature OCR fallback failed",ocrErr)}
-
-  renderCandidates();
-  status(`Found ${candidates.length} possible contact${candidates.length===1?"":"s"}. Your own messages/signature are ignored. Select the people you want to process.`,candidates.length?"ok":"error")
+  const from=item.from||{},body=await readBody(item);const myEmail=(Office.context.mailbox.userProfile?.emailAddress||"").toLowerCase();
+  candidates=allPhysicalSignatureCandidates(body.text||body.plainText||"",from.displayName||"",from.emailAddress||"",myEmail);
+  if(!candidates.length&&body.html){const htmlVisible=htmlBodyToText(body.html);candidates=allPhysicalSignatureCandidates(htmlVisible,from.displayName||"",from.emailAddress||"",myEmail)}
+  if(!candidates.length){try{const ocr=await imageSignatureCandidate(item,body.html||"",from.displayName||"",from.emailAddress||"",myEmail);if(ocr)candidates=[ocr]}catch(ocrErr){console.warn("Image signature OCR fallback failed",ocrErr)}}
+  candidates=candidates.map(c=>{if(!c?.parsed)return c;const identity=c.name||[c.parsed.givenName,c.parsed.middleName,c.parsed.surname].filter(Boolean).join(" ");c.parsed.jobTitle=sanitizeJobTitle(c.parsed.jobTitle,identity,c.parsed.signature||"");c.parsed.personalNotes=c.parsed.signature||"";return c});
+  renderCandidates();status(`Found ${candidates.length} signature block${candidates.length===1?"":"s"}. Select one signature block to process. Your own messages/signature are ignored.`,candidates.length?"ok":"error")
 }catch(e){status(e.message||String(e),"error")}}
-function clientId(){return localStorage.getItem("ccfe_client_id")||""}
-function showAuthSetup(){const id=clientId();$("authSetup").hidden=!!id;$("clientId").value=id}
-async function initMsal(){const id=clientId();if(!id)throw new Error("Microsoft Contacts access is not configured yet. Enter the Application (client) ID first.");if(!msalInstance){msalInstance=await createNestablePublicClientApplication({auth:{clientId:id,authority:"https://login.microsoftonline.com/common"},cache:{cacheLocation:"localStorage"}})}return msalInstance}
-async function accessToken(){const pca=await initMsal();const request={scopes:GRAPH_SCOPES,loginHint:Office.context.mailbox.userProfile.emailAddress};try{return (await pca.acquireTokenSilent(request)).accessToken}catch(err){if(err instanceof InteractionRequiredAuthError || /interaction|consent|login/i.test(String(err?.errorCode||err?.message||err))){return (await pca.acquireTokenPopup(request)).accessToken}throw err}}
-async function graph(path,opts={}){const token=await accessToken();const r=await fetch("https://graph.microsoft.com/v1.0"+path,{...opts,headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json",...(opts.headers||{})}});if(!r.ok){const t=await r.text();throw new Error(`Microsoft Contacts error ${r.status}: ${t.slice(0,350)}`)}if(r.status===204)return null;return r.json()}
-async function loadContacts(){let url="/me/contacts?$top=250&$select=id,displayName,givenName,middleName,surname,companyName,jobTitle,emailAddresses,businessPhones,mobilePhone,businessHomePage,businessAddress,homeAddress,otherAddress,personalNotes";const all=[];while(url){const data=await graph(url.replace("https://graph.microsoft.com/v1.0",""));all.push(...(data.value||[]));url=data["@odata.nextLink"]||""}return all}
-function n(s){return String(s||"").trim().toLowerCase().replace(/[^a-z0-9]+/g," ").trim()}
-function digits(s){return String(s||"").replace(/\D/g,"").slice(-10)}
-function addressHasData(a){return !!(a&&(a.street||a.city||a.state||a.postalCode||a.countryOrRegion))}
-function preferredExistingAddress(c){
-  if(addressHasData(c.businessAddress))return {a:c.businessAddress,type:"Business"};
-  if(addressHasData(c.homeAddress))return {a:c.homeAddress,type:"Home"};
-  if(addressHasData(c.otherAddress))return {a:c.otherAddress,type:"Other"};
-  return {a:{},type:""};
-}
-function existingFlat(c){const pref=preferredExistingAddress(c),a=pref.a||{};return{givenName:c.givenName||"",middleName:c.middleName||"",surname:c.surname||"",companyName:c.companyName||"",jobTitle:c.jobTitle||"",email:(c.emailAddresses?.[0]?.address)||"",businessPhone:(c.businessPhones?.[0])||"",mobilePhone:c.mobilePhone||"",businessFax:"",businessHomePage:c.businessHomePage||"",street:a.street||"",city:a.city||"",state:a.state||"",postalCode:a.postalCode||"",countryOrRegion:a.countryOrRegion||"",personalNotes:c.personalNotes||"",_addressType:pref.type,_allBusinessPhones:(c.businessPhones||[]).join(" | ")}}
-function matchContact(p){const email=n(p.email);if(email){const m=graphContacts.find(c=>(c.emailAddresses||[]).some(e=>n(e.address)===email));if(m)return{contact:m,confidence:"Exact email"}}
-  const full=n([p.givenName,p.middleName,p.surname].filter(Boolean).join(" "));const companyN=n(p.companyName);const ph=[digits(p.businessPhone),digits(p.mobilePhone)].filter(Boolean);
-  const candidates2=graphContacts.filter(c=>{const f=n([c.givenName,c.middleName,c.surname].filter(Boolean).join(" "));if(!full||f!==full)return false;const cf=n(c.companyName);if(companyN&&cf&&companyN===cf)return true;const cp=[...(c.businessPhones||[]),c.mobilePhone||""].map(digits).filter(Boolean);return ph.some(x=>cp.includes(x))});
-  return candidates2.length===1?{contact:candidates2[0],confidence:"Name + company/phone"}:null}
-function fieldDiffs(parsed,existing){const out=[];for(const [key,label] of Object.entries(FIELD_META)){const nv=(parsed[key]||"").trim(),ov=(existing[key]||"").trim();if(!nv)continue;if(n(nv)===n(ov))continue;out.push({key,label,old:ov,new:nv,defaultChecked:!ov})}return out}
-function graphPayload(p,keys=null,existing=null){const use=k=>!keys||keys.has(k);const o={};if(use("givenName"))o.givenName=p.givenName||"";if(use("middleName"))o.middleName=p.middleName||"";if(use("surname"))o.surname=p.surname||"";if(use("companyName"))o.companyName=p.companyName||"";if(use("jobTitle"))o.jobTitle=p.jobTitle||"";if(use("email")&&p.email)o.emailAddresses=[{address:p.email,name:[p.givenName,p.surname].filter(Boolean).join(" ")||p.email}];if(use("businessPhone")&&p.businessPhone)o.businessPhones=[phoneForOutlook(p.businessPhone)];if(use("mobilePhone")&&p.mobilePhone)o.mobilePhone=phoneForOutlook(p.mobilePhone);if(use("businessHomePage")&&p.businessHomePage)o.businessHomePage=p.businessHomePage;if(use("personalNotes"))o.personalNotes=p.personalNotes||"";
-  const addrNames=["street","city","state","postalCode","countryOrRegion"];
-  const addressKeys=addrNames.filter(use);
-  if(addressKeys.length){const base=existing||{};o.businessAddress={};for(const k of addrNames)o.businessAddress[k]=(use(k)&&p[k])?p[k]:(base[k]||"");}
-  return o}
-function editableFields(p,idx,existing=null){
-  return `<div class="grid">${Object.entries(FIELD_META).map(([k,l])=>{
-    const initial=(p[k]||"");
-    if(k==="personalNotes")return `<div class="field full notes-field"><div class="notes-label-row"><label>${html(l)} <span class="muted">— editable before saving</span></label><div class="notes-actions"><button type="button" class="mini-btn" data-notes-action="clear" data-index="${idx}">Clear Notes</button><button type="button" class="mini-btn" data-notes-action="restore" data-index="${idx}">Restore Signature</button></div></div><textarea data-review="${idx}" data-field="${k}" spellcheck="true" aria-label="Editable Notes">${html(initial)}</textarea><div class="muted notes-help">Delete, shorten, or rewrite this text. Outlook will receive exactly what remains in this box.</div></div>`;
-    return `<div class="field ${["email","street"].includes(k)?"full":""}"><label>${html(l)}</label><input data-review="${idx}" data-field="${k}" value="${html(initial)}"></div>`
-  }).join("")}</div>`
-}
-function comparisonRows(parsed,existing){
-  return Object.entries(FIELD_META).map(([key,label])=>{
-    const nv=(parsed[key]||"").trim(),ov=(existing[key]||"").trim();
-    const same=nv&&ov&&n(nv)===n(ov);
-    const state=!nv?"No value found in email":same?"Same":"Different / new";
-    const cls=!nv?"missing":same?"same":"changed";
-    return `<div class="compare-row ${cls}"><div class="compare-label">${html(label)}</div><div><span class="compare-head">Existing Outlook</span><div>${html(ov||"(blank)")}</div></div><div><span class="compare-head">From email</span><div>${html(nv||"(not found)")}</div></div><div class="compare-state">${html(state)}</div></div>`
-  }).join("")
-}
-function renderReviews(items){
-  const box=$("reviews");box.innerHTML="";
-  items.forEach((it,idx)=>{
-    const p=it.parsed,m=it.match,existing=m?existingFlat(m.contact):null,diffs=existing?fieldDiffs(p,existing):[];
-    const el=document.createElement("div");el.className="review";el.dataset.reviewCard=idx;
-    const badge=m?`<span class="badge existing">Existing contact — ${html(m.confidence)}</span>`:`<span class="badge">New contact</span>`;
-
-    let actionArea="";
-    if(m && diffs.length){
-      actionArea=`<div class="diffs"><b>Choose fields to update</b>${diffs.map(d=>`<label class="diff"><input type="checkbox" data-diff="${idx}" data-key="${d.key}" ${d.defaultChecked?"checked":""}><span>${html(d.label)}</span><span class="vals"><span class="old">Existing: ${html(d.old||"(blank)")}</span><br><span class="new">From email: ${html(d.new)}</span></span></label>`).join("")}</div><div class="toolbar"><button class="btn primary" data-action="update" data-index="${idx}">Update Existing Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`;
-    }else if(m){
-      actionArea=`<div class="toolbar"><span class="muted">No different nonblank fields were found to update.</span><button class="btn" data-action="skip" data-index="${idx}">Done</button></div>`;
-    }else{
-      actionArea=`<div class="toolbar"><button class="btn primary" data-action="create" data-index="${idx}">Create Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`;
-    }
-
-    el.innerHTML=`${badge}<div class="candidate-name" style="margin-top:6px">${html([p.givenName,p.middleName,p.surname].filter(Boolean).join(" ")||it.name)}</div><div class="muted">${html(p.email||it.email||"")}</div><div class="signature-sticky"><div class="sig-title">Signature block from email</div><pre>${html(p.signature||"No signature block confidently found")}</pre></div>${diagnosticPanel(p)}${editableFields(p,idx,null)}${actionArea}`;
-    box.appendChild(el);
-  });
-  $("reviewSection").hidden=false;
-  box.querySelectorAll("button[data-action]").forEach(b=>b.addEventListener("click",handleAction));
-  box.querySelectorAll("button[data-notes-action]").forEach(b=>b.addEventListener("click",e=>{
-    const idx=Number(e.currentTarget.dataset.index);
-    const ta=document.querySelector(`textarea[data-review="${idx}"][data-field="personalNotes"]`);
-    if(!ta)return;
-    if(e.currentTarget.dataset.notesAction==="clear")ta.value="";
-    else ta.value=(window.__reviewItems[idx]?.parsed?.signature||"");
-    ta.focus();
-  }));
-}
-function currentParsed(idx){const d={};document.querySelectorAll(`[data-review="${idx}"][data-field]`).forEach(i=>d[i.dataset.field]=i.value.trim());d.businessPhone=phoneForOutlook(d.businessPhone);d.mobilePhone=phoneForOutlook(d.mobilePhone);d.businessFax=phoneForOutlook(d.businessFax);return d}
-function finishCard(idx,label){const c=document.querySelector(`[data-review-card="${idx}"]`);c.classList.add("done");c.querySelectorAll("button").forEach(b=>b.disabled=true);const span=document.createElement("span");span.className="badge done";span.textContent=label;c.prepend(span)}
-async function handleAction(ev){const action=ev.currentTarget.dataset.action,idx=Number(ev.currentTarget.dataset.index),item=window.__reviewItems[idx];if(action==="skip"){finishCard(idx,"Skipped");return}try{ev.currentTarget.disabled=true;status(action==="create"?"Creating Outlook contact…":"Updating Outlook contact…");const p=currentParsed(idx);if(action==="create"){await graph("/me/contacts",{method:"POST",body:JSON.stringify(graphPayload(p))});finishCard(idx,"Created");status("Contact created in Outlook Contacts.","ok")}else{const selected=new Set([...document.querySelectorAll(`input[data-diff="${idx}"]:checked`)].map(x=>x.dataset.key));if(!selected.size)throw new Error("Check at least one field to update.");await graph(`/me/contacts/${encodeURIComponent(item.match.contact.id)}`,{method:"PATCH",body:JSON.stringify(graphPayload(p,selected,existingFlat(item.match.contact)))});finishCard(idx,"Updated");status("Existing Outlook contact updated.","ok")}}catch(e){ev.currentTarget.disabled=false;status(e.message||String(e),"error")}}
-async function compareSelected(){try{const selected=[...document.querySelectorAll("input[data-candidate]:checked")].map(x=>candidates[Number(x.dataset.candidate)]);if(!selected.length)throw new Error("Select at least one person first.");if(!clientId()){showAuthSetup();throw new Error("Complete the one-time Microsoft Contacts setup first.")}status("Signing in to Microsoft and checking Outlook Contacts…");graphContacts=await loadContacts();const items=selected.map(c=>({...c,match:matchContact(c.parsed)}));window.__reviewItems=items;renderReviews(items);status(`Compared ${items.length} selected contact${items.length===1?"":"s"} with ${graphContacts.length} Outlook contact${graphContacts.length===1?"":"s"}.`,"ok")}catch(e){status(e.message||String(e),"error")}}
-
-Office.onReady(async info=>{if(info.host!==Office.HostType.Outlook){status("This page must be opened from the Outlook add-in.","error");return}showAuthSetup();$("saveClientId").addEventListener("click",()=>{const id=$("clientId").value.trim();if(!/^[0-9a-f-]{36}$/i.test(id)){status("That does not look like a Microsoft Application (client) ID.","error");return}localStorage.setItem("ccfe_client_id",id);msalInstance=null;showAuthSetup();status("Client ID saved. You can now compare contacts.","ok")});$("selectAll").addEventListener("click",()=>document.querySelectorAll("input[data-candidate]").forEach(x=>x.checked=true));$("selectNone").addEventListener("click",()=>document.querySelectorAll("input[data-candidate]").forEach(x=>x.checked=false));$("scanAgain").addEventListener("click",scan);$("compareSelected").addEventListener("click",compareSelected);await scan()});
+async function compareSelected(){try{
+  const selected=[...document.querySelectorAll("input[data-candidate]:checked")].map(x=>candidates[Number(x.dataset.candidate)]);
+  if(selected.length!==1)throw new Error("Select exactly one signature block to process.");
+  if(!clientId()){showAuthSetup();throw new Error("Complete the one-time Microsoft Contacts setup first.")}
+  status("Signing in to Microsoft and checking Outlook Contacts…");graphContacts=await loadContacts();const items=selected.map(c=>({...c,match:matchContact(c.parsed)}));window.__reviewItems=items;renderReviews(items);status(`Compared the selected signature with ${graphContacts.length} Outlook contact${graphContacts.length===1?"":"s"}.`,"ok")
+}catch(e){status(e.message||String(e),"error")}}
+Office.onReady(async info=>{if(info.host!==Office.HostType.Outlook){status("This page must be opened from the Outlook add-in.","error");return}showAuthSetup();$("saveClientId").addEventListener("click",()=>{const id=$("clientId").value.trim();if(!/^[0-9a-f-]{36}$/i.test(id)){status("That does not look like a Microsoft Application (client) ID.","error");return}localStorage.setItem("ccfe_client_id",id);msalInstance=null;showAuthSetup();status("Client ID saved. You can now compare contacts.","ok")});$("selectAll").addEventListener("click",()=>document.querySelectorAll("input[data-candidate]").forEach(x=>x.checked=false));$("scanAgain").addEventListener("click",scan);$("compareSelected").addEventListener("click",compareSelected);await scan()});
 
 
 

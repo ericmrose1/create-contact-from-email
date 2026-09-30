@@ -36,7 +36,7 @@
 </head>
 <body>
   <h1>Create Contact from Email</h1>
-  <div class="sub"><b>v2.7.5</b> — Finds people in the current email chain, lets you select several, and checks your Outlook Contacts before creating or updating anything.</div>
+  <div class="sub"><b>v2.8.0</b> — Finds people in the current email chain, lets you select several, and checks your Outlook Contacts before creating or updating anything.</div>
   <div id="status" class="status">Opening the selected email…</div>
 
   <div id="authSetup" class="setup" hidden>
@@ -49,12 +49,12 @@
   <section id="candidateSection" hidden>
     <h2>People found in this email</h2>
     <div class="toolbar">
-      <button id="selectAll" class="btn" type="button">Select All</button>
-      <button id="selectNone" class="btn" type="button">Clear</button>
+      <button id="selectAll" class="btn" type="button">Clear Selection</button>
+      
       <button id="scanAgain" class="btn" type="button">Scan Email Again</button>
     </div>
     <div id="candidates"></div>
-    <div class="toolbar"><button id="compareSelected" class="btn primary" type="button">Compare Selected with Outlook Contacts</button></div>
+    <div class="toolbar"><button id="compareSelected" class="btn primary" type="button">Use Selected Signature</button></div>
   </section>
 
   <section id="reviewSection" hidden>
