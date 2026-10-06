@@ -1509,7 +1509,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.9.0 — stricter image-signature OCR classification.
+// v2.9.1 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -2033,6 +2033,106 @@ function finalizeCandidate(c){
   c.text=tight;
   return c;
 }
+
+function enrichMissingExplicitAddressFromBody(candidate,bodyText){
+  if(!candidate?.parsed)return candidate;
+  const p=candidate.parsed;
+  if(p.street||p.city||p.state||p.postalCode||p.countryOrRegion)return candidate;
+
+  const email=cleanEmail(candidate.email||p.email||"");
+  if(!email||!bodyText)return candidate;
+
+  const lines=norm(bodyText).split("\n");
+  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
+  const matches=[];
+
+  const cleanLine=v=>String(v||"")
+    .replace(/[\u00ad\u200b-\u200d\ufeff]/g,"")
+    .replace(/\u00a0/g," ")
+    .replace(/\s+/g," ")
+    .trim();
+
+  const companyKey=String(p.companyName||"").toLowerCase()
+    .replace(/[^a-z0-9]+/g," ")
+    .split(/\s+/).filter(w=>w.length>3).slice(0,3);
+
+  const identity=candidate.name||[p.givenName,p.middleName,p.surname].filter(Boolean).join(" ");
+  const surname=String(nameParts(identity||"").surname||"").toLowerCase();
+
+  for(let i=0;i<lines.length;i++){
+    const line=cleanLine(lines[i]);
+    if(!line)continue;
+    const found=cleanEmail(line);
+    if(!found||found!==email)continue;
+
+    const tail=[];
+    let nonblank=0;
+    for(let j=i+1;j<lines.length&&j<=i+45&&nonblank<10;j++){
+      const v=cleanLine(lines[j]);
+      if(!v)continue;
+      if(isHeader(v))break;
+      if(cleanEmail(v)&&cleanEmail(v)!==email)break;
+      nonblank++;
+      tail.push(v);
+
+      const combined=cleanSignatureText(
+        [p.signature||candidate.text||"",...tail].filter(Boolean).join("\n")
+      );
+      const ad=address(combined);
+      if(ad.street&&ad.state&&ad.postalCode){
+        let score=0;
+        const before=[];
+        for(let k=i-1;k>=0&&k>=i-30&&before.length<12;k--){
+          const b=cleanLine(lines[k]);
+          if(!b)continue;
+          if(isHeader(b))break;
+          before.unshift(b);
+        }
+        const nearby=before.join(" ").toLowerCase();
+        if(p.businessPhone&&lineHasPhone(nearby,p.businessPhone))score+=4;
+        if(p.mobilePhone&&lineHasPhone(nearby,p.mobilePhone))score+=3;
+        if(surname&&nearby.includes(surname))score+=2;
+        if(companyKey.length&&companyKey.some(w=>nearby.includes(w)))score+=2;
+
+        matches.push({
+          score,
+          ad,
+          signature:combined,
+          addressKey:[ad.street,ad.city,ad.state,ad.postalCode].join("|").toLowerCase()
+        });
+        break;
+      }
+
+      // Do not wander into normal prose after a signature.
+      if(v.length>120&&/[.!?]$/.test(v))break;
+    }
+  }
+
+  if(!matches.length)return candidate;
+  matches.sort((a,b)=>b.score-a.score);
+  const topScore=matches[0].score;
+  const top=matches.filter(x=>x.score===topScore);
+  const uniqueAddresses=new Set(top.map(x=>x.addressKey));
+
+  // If equally plausible occurrences point to different addresses, do nothing.
+  if(uniqueAddresses.size>1)return candidate;
+
+  const best=top[0];
+  p.street=best.ad.street;
+  p.city=best.ad.city;
+  p.state=best.ad.state;
+  p.postalCode=best.ad.postalCode;
+  p.countryOrRegion=best.ad.countryOrRegion||usCountry(best.ad.state);
+
+  // The discovered address is part of the same explicit signature tail, so keep
+  // Notes/preview complete as well.
+  p.signature=best.signature;
+  p.personalNotes=best.signature;
+  candidate.text=best.signature;
+  p._debug={...(p._debug||{}),addressEnrichedFromNearbyExplicitSignature:true};
+  return candidate;
+}
+
 async function scan(){try{
   status("Reading the current email chain…");$("reviewSection").hidden=true;
   const item=Office.context.mailbox.item;if(!item||item.itemType!==Office.MailboxEnums.ItemType.Message)throw new Error("Open or select an email message first.");
@@ -2068,6 +2168,11 @@ async function scan(){try{
       if(ocr)signatureCandidates=[ocr];
     }catch(ocrErr){console.warn("Image signature OCR fallback failed",ocrErr)}
   }
+
+  // Additive address completion only when the detected contact has no address.
+  // Prefer Outlook's Text body because it preserves the literal signature content.
+  const addressSource=textBody||htmlVisible||"";
+  signatureCandidates=signatureCandidates.map(c=>enrichMissingExplicitAddressFromBody(c,addressSource));
 
   candidates=[...signatureCandidates,...referralCandidates]
     .sort((a,b)=>(a.globalStart??0)-(b.globalStart??0));
