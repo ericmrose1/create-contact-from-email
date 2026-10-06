@@ -1395,7 +1395,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.8.3 — stricter image-signature OCR classification.
+// v2.8.4 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -1924,13 +1924,19 @@ async function scan(){try{
   const item=Office.context.mailbox.item;if(!item||item.itemType!==Office.MailboxEnums.ItemType.Message)throw new Error("Open or select an email message first.");
   const from=item.from||{},body=await readBody(item);const myEmail=(Office.context.mailbox.userProfile?.emailAddress||"").toLowerCase();
   const textCandidates=allPhysicalSignatureCandidates(body.text||body.plainText||"",from.displayName||"",from.emailAddress||"",myEmail);
-  const htmlVisible=body.html?htmlBodyToText(body.html):"";
-  const htmlCandidates=htmlVisible?allPhysicalSignatureCandidates(htmlVisible,from.displayName||"",from.emailAddress||"",myEmail):[];
-  const totalLines=xs=>xs.reduce((n,c)=>n+norm(c?.parsed?.signature||"").split("\n").filter(Boolean).length,0);
-  if(htmlCandidates.length>textCandidates.length)candidates=htmlCandidates;
-  else if(textCandidates.length>htmlCandidates.length)candidates=textCandidates;
-  else if(htmlCandidates.length&&totalLines(htmlCandidates)<totalLines(textCandidates))candidates=htmlCandidates;
-  else candidates=textCandidates;
+
+  // Outlook's actual Text body is authoritative whenever it yields signatures.
+  // We had been allowing the HTML-derived representation to replace a correct
+  // Text candidate set simply because it found more/tighter blocks. That can
+  // drop visible phone text that Outlook exposes correctly in CoercionType.Text.
+  if(textCandidates.length){
+    candidates=textCandidates;
+  }else{
+    const htmlVisible=body.html?htmlBodyToText(body.html):"";
+    candidates=htmlVisible
+      ? allPhysicalSignatureCandidates(htmlVisible,from.displayName||"",from.emailAddress||"",myEmail)
+      : [];
+  }
   if(!candidates.length){try{const ocr=await imageSignatureCandidate(item,body.html||"",from.displayName||"",from.emailAddress||"",myEmail);if(ocr)candidates=[ocr]}catch(ocrErr){console.warn("Image signature OCR fallback failed",ocrErr)}}
   candidates=candidates.map(c=>{if(!c?.parsed)return c;const identity=c.name||[c.parsed.givenName,c.parsed.middleName,c.parsed.surname].filter(Boolean).join(" ");c.parsed.jobTitle=sanitizeJobTitle(c.parsed.jobTitle,identity,c.parsed.signature||"");c.parsed.personalNotes=c.parsed.signature||"";return c});
   renderCandidates();status(`Found ${candidates.length} signature block${candidates.length===1?"":"s"}. Select one signature block to process. Your own messages/signature are ignored.`,candidates.length?"ok":"error")
