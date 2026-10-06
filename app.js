@@ -1509,7 +1509,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.9.1 — stricter image-signature OCR classification.
+// v2.9.2 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -2034,6 +2034,98 @@ function finalizeCandidate(c){
   return c;
 }
 
+
+function recoverCurrentSenderSignatureCandidates(bodyText,currentName,currentEmail,myEmail){
+  const email=cleanEmail(currentEmail||"");
+  if(!bodyText||!email||sameEmail(email,myEmail))return [];
+
+  const segments=allMessageSegments(bodyText,currentName||"",email);
+  const current=segments[0];
+  if(!current?.text)return [];
+
+  const lines=norm(current.text).split("\n");
+  const cleanLine=v=>String(v||"")
+    .replace(/[\u00ad\u200b-\u200d\ufeff]/g,"")
+    .replace(/\u00a0/g," ")
+    .replace(/\s+/g," ")
+    .trim();
+  const isMessageHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l);
+
+  const out=[];
+
+  for(let i=0;i<lines.length;i++){
+    const v=cleanLine(lines[i]);
+    if(!v||cleanEmail(v)!==email)continue;
+
+    // Find a human signer above the current sender email. A graphic/divider
+    // line may sit between the company name and phone/email, so do not treat
+    // underscores/dashes as an Outlook message boundary here.
+    let nameIdx=-1;
+    for(let j=i-1;j>=Math.max(0,i-24);j--){
+      const b=cleanLine(lines[j]);
+      if(!b)continue;
+      if(isMessageHeader(b))break;
+      if(/^[-_=]{5,}$/.test(b))continue;
+      if(isClosingPhrase(b))continue;
+      if(looksLikePersonName(b)){
+        nameIdx=j;
+        break;
+      }
+    }
+    if(nameIdx<0)continue;
+
+    let end=i;
+    let nonblankAfterEmail=0;
+    for(let j=i+1;j<Math.min(lines.length,i+40);j++){
+      const f=cleanLine(lines[j]);
+      if(!f)continue;
+      if(isMessageHeader(f))break;
+      if(/^[-_=]{5,}$/.test(f))continue;
+      if(cleanEmail(f)&&cleanEmail(f)!==email)break;
+
+      end=j;
+      nonblankAfterEmail++;
+
+      const candidateText=lines.slice(nameIdx,end+1)
+        .map(cleanLine)
+        .filter(x=>x&&!/^[-_=]{5,}$/.test(x))
+        .join("\n");
+      const ad=address(candidateText);
+      if(ad.street&&ad.state&&ad.postalCode)break;
+
+      if(nonblankAfterEmail>=10&&f.length>100&&/[.!?]$/.test(f))break;
+    }
+
+    const raw=lines.slice(nameIdx,end+1)
+      .map(cleanLine)
+      .filter(x=>x&&!/^[-_=]{5,}$/.test(x));
+    const sig=cleanSignatureText(raw.join("\n"));
+    if(!sig)continue;
+
+    const parsed=parseContactFromSignature("",email,sig);
+    if(!parsed.givenName||!parsed.surname)continue;
+    if(!parsed.businessPhone&&!parsed.mobilePhone&&!parsed.businessHomePage&&!parsed.street)continue;
+
+    parsed.personalNotes=parsed.signature||sig;
+    parsed._debug={...(parsed._debug||{}),source:"Current sender signature recovery"};
+
+    out.push({
+      score:100,
+      name:[parsed.givenName,parsed.middleName,parsed.surname].filter(Boolean).join(" "),
+      email,
+      text:parsed.signature||sig,
+      parsed,
+      candidateType:"signature",
+      physicalOccurrence:true,
+      occurrenceKey:`current-recovery:${current.start||0}:${nameIdx}:${i}`,
+      globalStart:(current.start||0)+nameIdx,
+      globalEnd:(current.start||0)+end
+    });
+  }
+  return out;
+}
+
+
 function enrichMissingExplicitAddressFromBody(candidate,bodyText){
   if(!candidate?.parsed)return candidate;
   const p=candidate.parsed;
@@ -2149,9 +2241,20 @@ async function scan(){try{
   let signatureCandidates=textSignatures;
   let referralCandidates=textReferrals;
 
+  // Narrow fallback for a current sender whose Outlook display identity is
+  // an organization rather than the human signer.
+  if(!signatureCandidates.length){
+    signatureCandidates=recoverCurrentSenderSignatureCandidates(
+      textBody,
+      from.displayName||"",
+      from.emailAddress||"",
+      myEmail
+    );
+  }
+
   const htmlVisible=body.html?htmlBodyToText(body.html):"";
 
-  // Preserve v2.8.4 signature source rule: Text is authoritative when it yields signatures.
+  // Text (including the narrow recovered Text case) stays authoritative.
   if(!signatureCandidates.length&&htmlVisible){
     signatureCandidates=allPhysicalSignatureCandidates(htmlVisible,from.displayName||"",from.emailAddress||"",myEmail);
   }
