@@ -1077,20 +1077,39 @@ function boundedSignatureAtName(lines,nameIndex,identityName,identityEmail){
   const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
   const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
   const raw=[];
-  for(let j=nameIndex;j<Math.min(lines.length,nameIndex+14);j++){
-    const v=String(lines[j]||"").trim();
+  let lastIncluded=nameIndex-1;
+  let blankRun=0;
+
+  // Outlook often inserts blank lines between every visual line of a signature.
+  // Blank lines therefore are not, by themselves, a signature boundary.
+  for(let j=nameIndex;j<Math.min(lines.length,nameIndex+22);j++){
+    const v=String(lines[j]||"")
+      .replace(/[\u00ad\u200b-\u200d\ufeff]/g,"")
+      .trim();
+
     if(j>nameIndex&&(isHeader(v)||isDisclaimer(v)))break;
-    if(!v){if(raw.length>=4)break;continue}
+
+    if(!v){
+      blankRun++;
+      // Three consecutive blank lines after a substantial block are a safe stop.
+      if(blankRun>=3&&raw.length>=4)break;
+      continue;
+    }
+    blankRun=0;
+
     if(j>nameIndex&&isClosingPhrase(v))break;
     if(j>nameIndex&&nameMatchesIdentity(v,identityName))break;
+
+    // A horizontal divider ends the physical signature block.
+    if(/^[-_]{5,}$/.test(v))break;
+
     raw.push(v);
-    if(raw.length>=4&&signatureEvidenceScore(raw)>=7){
-      const hasTerminal=raw.some(x=>sameEmail(cleanEmail(x),identityEmail))||raw.some(x=>/^https?:|^www\./i.test(x))||raw.some(x=>/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(x));
-      if(hasTerminal&&raw.length>=5)break;
-    }
+    lastIncluded=j;
   }
-  const sig=cleanSignatureText(raw.join("\n"));if(!sig||signatureEvidenceScore(raw)<5)return null;
-  return {start:nameIndex,end:nameIndex+raw.length-1,sig};
+
+  const sig=cleanSignatureText(raw.join("\n"));
+  if(!sig||signatureEvidenceScore(raw)<5)return null;
+  return {start:nameIndex,end:lastIncluded,sig};
 }
 function signatureOccurrencesInSegment(segment,myEmail){
   const identityEmail=cleanEmail(segment.email),identityName=cleanName(segment.name||"");
@@ -1376,7 +1395,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.8.2 — stricter image-signature OCR classification.
+// v2.8.3 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
