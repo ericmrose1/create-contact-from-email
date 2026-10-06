@@ -1152,6 +1152,117 @@ function allPhysicalSignatureCandidates(body,currentName,currentEmail,myEmail){
   out.sort((a,b)=>(a.globalStart??0)-(b.globalStart??0));
   return out;
 }
+
+function referralLineText(v){
+  return String(v||"")
+    .replace(/[\u00ad\u200b-\u200d\ufeff]/g,"")
+    .replace(/\u00a0/g," ")
+    .replace(/\s+/g," ")
+    .trim();
+}
+
+function referralEmailLine(line){
+  const raw=referralLineText(line);
+  const email=cleanEmail(raw);
+  if(!email)return "";
+  const residue=raw.replace(new RegExp(email.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"i"),"")
+    .replace(/^(?:e|email)\s*[:\-]?\s*/i,"")
+    .replace(/[<>\s]/g,"");
+  return residue?"":email;
+}
+
+function referralPersonPhoneLine(line){
+  const raw=referralLineText(line);
+  // Conservative form: "First Last: phone".  At least two name tokens.
+  const m=raw.match(/^([A-Z][A-Za-z'’.\-]+(?:\s+(?:[A-Z]\.?|[A-Z][A-Za-z'’.\-]+)){1,4})\s*:\s*(.+)$/);
+  if(!m)return null;
+
+  const name=cleanName(m[1]);
+  const phone=phoneForOutlook(m[2]);
+  const digitsOnly=phone.replace(/\D/g,"");
+  if(!looksLikePersonName(name)||digitsOnly.length<10||digitsOnly.length>15)return null;
+  return {name,phone};
+}
+
+function plausibleReferralCompanyLine(line){
+  const raw=referralLineText(line);
+  if(!raw||raw.length<2||raw.length>80)return false;
+  if(cleanEmail(raw)||/^https?:|^www\./i.test(raw)||/\d{3}[\s().\-]\d{3}/.test(raw))return false;
+  if(/^\s*(?:from|sent|to|cc|bcc|subject)\s*:/i.test(raw))return false;
+  if(isClosingPhrase(raw))return false;
+  if(/[!?]$/.test(raw))return false;
+  if(raw.split(/\s+/).length>8)return false;
+  if(/^(?:hi|hello|dear|thanks?|thank you|regards?|best|references?|please|attached|updated|talk|worked|yes|no)\b/i.test(raw))return false;
+  return /[A-Za-z]/.test(raw);
+}
+
+function nextReferralNonblank(lines,start,maxLook=4){
+  for(let i=start;i<Math.min(lines.length,start+maxLook);i++){
+    if(referralLineText(lines[i]))return i;
+  }
+  return -1;
+}
+
+function referredContactCandidates(body,myEmail){
+  const lines=norm(body).split("\n");
+  const out=[];
+
+  for(let i=0;i<lines.length;i++){
+    const company=referralLineText(lines[i]);
+    if(!plausibleReferralCompanyLine(company))continue;
+
+    const personIdx=nextReferralNonblank(lines,i+1,4);
+    if(personIdx<0)continue;
+    const pp=referralPersonPhoneLine(lines[personIdx]);
+    if(!pp)continue;
+
+    const emailIdx=nextReferralNonblank(lines,personIdx+1,4);
+    if(emailIdx<0)continue;
+    const email=referralEmailLine(lines[emailIdx]);
+    if(!email||sameEmail(email,myEmail))continue;
+
+    // Keep this deliberately narrow: the three logical lines are the complete
+    // referred-contact block. Do not infer title, address, or homepage.
+    const block=[company,referralLineText(lines[personIdx]),referralLineText(lines[emailIdx])].join("\n");
+    const np=nameParts(pp.name);
+    const parsed={
+      givenName:np.givenName,
+      middleName:np.middleName,
+      surname:np.surname,
+      companyName:company,
+      jobTitle:"",
+      email,
+      businessPhone:pp.phone,
+      mobilePhone:"",
+      businessFax:"",
+      businessHomePage:"",
+      street:"",
+      city:"",
+      state:"",
+      postalCode:"",
+      countryOrRegion:"",
+      signature:block,
+      personalNotes:block,
+      _debug:{source:"Contact information found in message",referralContact:true}
+    };
+
+    out.push({
+      score:100,
+      name:pp.name,
+      email,
+      text:block,
+      parsed,
+      candidateType:"referral",
+      physicalOccurrence:true,
+      occurrenceKey:`referral:${i}:${personIdx}:${emailIdx}`,
+      globalStart:i,
+      globalEnd:emailIdx
+    });
+  }
+
+  return out;
+}
+
 function candidateOccurrenceLabels(items){
   const totals=new Map();for(const c of items){const k=cleanEmail(c.email)||String(c.name||"").toLowerCase();totals.set(k,(totals.get(k)||0)+1)}
   const seen=new Map();return items.map(c=>{const k=cleanEmail(c.email)||String(c.name||"").toLowerCase();const n=(seen.get(k)||0)+1;seen.set(k,n);return{n,total:totals.get(k)||1}});
@@ -1160,9 +1271,12 @@ function candidateOccurrenceLabels(items){
 function renderCandidates(){
   const box=$("candidates");box.innerHTML="";const labels=candidateOccurrenceLabels(candidates);
   candidates.forEach((c,i)=>{
-    const lab=labels[i];const occ=lab.total>1?`<div class="muted">Signature occurrence ${lab.n} of ${lab.total}</div>`:`<div class="muted">Signature occurrence</div>`;
+    const lab=labels[i];
+    const occ=c.candidateType==="referral"
+      ? `<div class="muted">Contact information found in message</div>`
+      : (lab.total>1?`<div class="muted">Signature occurrence ${lab.n} of ${lab.total}</div>`:`<div class="muted">Signature occurrence</div>`);
     const el=document.createElement("div");el.className="candidate";
-    el.innerHTML=`<div class="candidate-head"><input type="checkbox" data-candidate="${i}"><div><div class="candidate-name">${html(c.name||"Unknown sender")}</div><div class="muted">${html(c.email||"No email found")}</div>${occ}</div></div><div class="preview">${html(c.parsed.signature||"No signature block confidently found")}</div>`;
+    el.innerHTML=`<div class="candidate-head"><input type="checkbox" data-candidate="${i}"><div><div class="candidate-name">${html(c.name||"Unknown sender")}</div><div class="muted">${html(c.email||"No email found")}</div>${occ}</div></div><div class="preview">${html(c.parsed.signature||"No contact block confidently found")}</div>`;
     const cb=el.querySelector('input[data-candidate]');cb.addEventListener("change",()=>{if(!cb.checked)return;document.querySelectorAll('input[data-candidate]').forEach(x=>{if(x!==cb)x.checked=false})});box.appendChild(el)
   });
   $("candidateSection").hidden=false
@@ -1395,7 +1509,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.8.4 — stricter image-signature OCR classification.
+// v2.9.0 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -1923,23 +2037,43 @@ async function scan(){try{
   status("Reading the current email chain…");$("reviewSection").hidden=true;
   const item=Office.context.mailbox.item;if(!item||item.itemType!==Office.MailboxEnums.ItemType.Message)throw new Error("Open or select an email message first.");
   const from=item.from||{},body=await readBody(item);const myEmail=(Office.context.mailbox.userProfile?.emailAddress||"").toLowerCase();
-  const textCandidates=allPhysicalSignatureCandidates(body.text||body.plainText||"",from.displayName||"",from.emailAddress||"",myEmail);
+  const textBody=body.text||body.plainText||"";
 
-  // Outlook's actual Text body is authoritative whenever it yields signatures.
-  // We had been allowing the HTML-derived representation to replace a correct
-  // Text candidate set simply because it found more/tighter blocks. That can
-  // drop visible phone text that Outlook exposes correctly in CoercionType.Text.
-  if(textCandidates.length){
-    candidates=textCandidates;
-  }else{
-    const htmlVisible=body.html?htmlBodyToText(body.html):"";
-    candidates=htmlVisible
-      ? allPhysicalSignatureCandidates(htmlVisible,from.displayName||"",from.emailAddress||"",myEmail)
-      : [];
+  // EXISTING SIGNATURE DETECTOR — unchanged.
+  const textSignatures=allPhysicalSignatureCandidates(textBody,from.displayName||"",from.emailAddress||"",myEmail);
+
+  // NEW, independent detector for compact contact information intentionally
+  // written into the message body by another sender.
+  const textReferrals=referredContactCandidates(textBody,myEmail);
+
+  let signatureCandidates=textSignatures;
+  let referralCandidates=textReferrals;
+
+  const htmlVisible=body.html?htmlBodyToText(body.html):"";
+
+  // Preserve v2.8.4 signature source rule: Text is authoritative when it yields signatures.
+  if(!signatureCandidates.length&&htmlVisible){
+    signatureCandidates=allPhysicalSignatureCandidates(htmlVisible,from.displayName||"",from.emailAddress||"",myEmail);
   }
-  if(!candidates.length){try{const ocr=await imageSignatureCandidate(item,body.html||"",from.displayName||"",from.emailAddress||"",myEmail);if(ocr)candidates=[ocr]}catch(ocrErr){console.warn("Image signature OCR fallback failed",ocrErr)}}
+
+  // Same independent fallback rule for referred contact blocks.
+  if(!referralCandidates.length&&htmlVisible){
+    referralCandidates=referredContactCandidates(htmlVisible,myEmail);
+  }
+
+  // Preserve OCR behavior for signatures even when a referred contact was found.
+  if(!signatureCandidates.length){
+    try{
+      const ocr=await imageSignatureCandidate(item,body.html||"",from.displayName||"",from.emailAddress||"",myEmail);
+      if(ocr)signatureCandidates=[ocr];
+    }catch(ocrErr){console.warn("Image signature OCR fallback failed",ocrErr)}
+  }
+
+  candidates=[...signatureCandidates,...referralCandidates]
+    .sort((a,b)=>(a.globalStart??0)-(b.globalStart??0));
+
   candidates=candidates.map(c=>{if(!c?.parsed)return c;const identity=c.name||[c.parsed.givenName,c.parsed.middleName,c.parsed.surname].filter(Boolean).join(" ");c.parsed.jobTitle=sanitizeJobTitle(c.parsed.jobTitle,identity,c.parsed.signature||"");c.parsed.personalNotes=c.parsed.signature||"";return c});
-  renderCandidates();status(`Found ${candidates.length} signature block${candidates.length===1?"":"s"}. Select one signature block to process. Your own messages/signature are ignored.`,candidates.length?"ok":"error")
+  renderCandidates();status(`Found ${candidates.length} contact choice${candidates.length===1?"":"s"}. Select one to process. Your own messages/signature are ignored.`,candidates.length?"ok":"error")
 }catch(e){status(e.message||String(e),"error")}}
 const APP_CLIENT_ID="aaaad2a2-1ca4-4d45-8b8d-21c56f2c4137";
 function clientId(){return APP_CLIENT_ID}
