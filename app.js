@@ -1509,7 +1509,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.9.3 — stricter image-signature OCR classification.
+// v2.9.4 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -2366,9 +2366,34 @@ async function scan(){try{
 
   const htmlVisible=body.html?htmlBodyToText(body.html):"";
 
-  // Text (including the narrow recovered Text case) stays authoritative.
+  // Text (including the narrow recovered Text cases) stays authoritative.
+  // If Text yields nothing, apply the SAME recovery sequence to the HTML-visible
+  // representation rather than dropping back to the general detector alone.
   if(!signatureCandidates.length&&htmlVisible){
-    signatureCandidates=allPhysicalSignatureCandidates(htmlVisible,from.displayName||"",from.emailAddress||"",myEmail);
+    signatureCandidates=allPhysicalSignatureCandidates(
+      htmlVisible,
+      from.displayName||"",
+      from.emailAddress||"",
+      myEmail
+    );
+
+    if(!signatureCandidates.length){
+      signatureCandidates=recoverCurrentSenderSignatureCandidates(
+        htmlVisible,
+        from.displayName||"",
+        from.emailAddress||"",
+        myEmail
+      );
+    }
+
+    if(!signatureCandidates.length){
+      signatureCandidates=recoverCurrentSenderNameCompanyCandidates(
+        htmlVisible,
+        from.displayName||"",
+        from.emailAddress||"",
+        myEmail
+      );
+    }
   }
 
   // Same independent fallback rule for referred contact blocks.
