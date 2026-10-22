@@ -674,6 +674,318 @@ function isolateSignature(segmentText,senderEmail){
   if(best.score>=3)return best.chunk.join("\n");
   return "";
 }
+
+const US_STATE_NAMES={
+  alabama:"AL",alaska:"AK",arizona:"AZ",arkansas:"AR",california:"CA",colorado:"CO",connecticut:"CT",delaware:"DE",florida:"FL",georgia:"GA",hawaii:"HI",idaho:"ID",illinois:"IL",indiana:"IN",iowa:"IA",kansas:"KS",kentucky:"KY",louisiana:"LA",maine:"ME",maryland:"MD",massachusetts:"MA",michigan:"MI",minnesota:"MN",mississippi:"MS",missouri:"MO",montana:"MT",nebraska:"NE",nevada:"NV","new hampshire":"NH","new jersey":"NJ","new mexico":"NM","new york":"NY","north carolina":"NC","north dakota":"ND",ohio:"OH",oklahoma:"OK",oregon:"OR",pennsylvania:"PA","rhode island":"RI","south carolina":"SC","south dakota":"SD",tennessee:"TN",texas:"TX",utah:"UT",vermont:"VT",virginia:"VA",washington:"WA","west virginia":"WV",wisconsin:"WI",wyoming:"WY","district of columbia":"DC"
+};
+
+function structuredStateAbbrev(v){
+  const raw=String(v||"").trim();
+  if(!raw)return"";
+  const up=raw.toUpperCase();
+  if(US_STATES.has(up))return up;
+  return US_STATE_NAMES[raw.toLowerCase()]||"";
+}
+
+function structuredPhoneObservations(sig){
+  const observations=[];
+  const re=/(?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4}(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*\d+)?/gi;
+  const labelFrom=text=>{
+    const t=String(text||"").toLowerCase().replace(/[^a-z/]+/g," ").replace(/\s+/g," ").trim();
+    if(/direct\s*[/&+\-]\s*text|direct text|text\s*[/&+\-]\s*direct/.test(t))return"directtext";
+    if(/\b(fax)\b|^f$/.test(t))return"fax";
+    if(/\b(mobile|cell|cellular)\b|^(m|c)$/.test(t))return"mobile";
+    if(/\b(office|business|work|main|telephone|phone|tel)\b|^o$/.test(t))return"business";
+    if(/\bdirect\b|^d$/.test(t))return"direct";
+    return"";
+  };
+  for(const rawLine of norm(sig).split("\n")){
+    const line=String(rawLine||"").replace(/\u00a0/g," ").trim();
+    if(!line)continue;
+    for(const m of line.matchAll(re)){
+      const value=phoneForOutlook(m[0]); if(!value)continue;
+      const before=line.slice(Math.max(0,(m.index||0)-28),m.index||0);
+      const after=line.slice((m.index||0)+m[0].length,Math.min(line.length,(m.index||0)+m[0].length+28));
+      let label=labelFrom(before)||labelFrom(after);
+      // Explicit short suffixes such as (O), (D), (M), (C), (F).
+      const sm=after.match(/^\s*\(\s*([ODMFC])\s*\)/i);
+      if(sm){const k=sm[1].toUpperCase();label={O:"business",D:"direct",M:"mobile",C:"mobile",F:"fax"}[k]||label}
+      const pm=before.match(/(?:^|[|•;\s])\(?\s*([ODMFC])\s*\)?\s*[:.\-]?\s*$/i);
+      if(pm){const k=pm[1].toUpperCase();label={O:"business",D:"direct",M:"mobile",C:"mobile",F:"fax"}[k]||label}
+      observations.push({value,label,hasExtension:/x\d+$/i.test(value),line});
+    }
+  }
+  // Physical number de-dupe while keeping the strongest label.
+  const rank={fax:6,business:5,mobile:5,directtext:5,direct:4,"":1};
+  const by=new Map();
+  for(const o of observations){
+    const prev=by.get(o.value);
+    if(!prev||rank[o.label]>rank[prev.label])by.set(o.value,o);
+  }
+  return [...by.values()];
+}
+
+function structuredPhones(sig){
+  const obs=structuredPhoneObservations(sig);
+  const out={businessPhone:"",mobilePhone:"",businessFax:""};
+  const take=(kind,o)=>{if(o&&!out[kind])out[kind]=o.value};
+  const fax=obs.filter(o=>o.label==="fax");
+  const bus=obs.filter(o=>o.label==="business");
+  const mob=obs.filter(o=>o.label==="mobile"||o.label==="directtext");
+  const direct=obs.filter(o=>o.label==="direct");
+  const unlabeled=obs.filter(o=>!o.label);
+  take("businessFax",fax[0]);
+  take("businessPhone",bus[0]);
+  take("mobilePhone",mob[0]);
+
+  // Direct with an extension is a company/direct-dial number, so Business.
+  for(const o of direct.filter(x=>x.hasExtension))take("businessPhone",o);
+
+  // Assign one unlabeled number as Business before interpreting a bare Direct.
+  // This makes an unlabeled main number + Direct number map Business + Mobile.
+  for(const o of unlabeled)take("businessPhone",o);
+
+  for(const o of direct.filter(x=>!x.hasExtension)){
+    if(out.businessPhone && out.businessPhone!==o.value)take("mobilePhone",o);
+    else if(!out.mobilePhone && (bus.length||unlabeled.some(x=>x.value!==o.value)))take("mobilePhone",o);
+    else take("businessPhone",o);
+  }
+
+  // If only an explicit mobile existed, a remaining unlabeled number is Business.
+  if(!out.businessPhone){for(const o of unlabeled)take("businessPhone",o)}
+
+  // Preserve old parser only as a gap filler, never overriding relational assignments.
+  const legacy=phones(sig);
+  if(!out.businessPhone)out.businessPhone=legacy.businessPhone||"";
+  if(!out.mobilePhone)out.mobilePhone=legacy.mobilePhone||"";
+  if(!out.businessFax)out.businessFax=legacy.businessFax||"";
+  if(out.businessPhone===out.mobilePhone)out.mobilePhone="";
+  if(out.businessPhone===out.businessFax)out.businessFax="";
+  return out;
+}
+
+function structuredAddress(sig){
+  const legacy=address(sig);
+  if(legacy.street&&legacy.city&&legacy.state&&legacy.postalCode)return legacy;
+  const lines=norm(sig).split("\n").map(x=>String(x||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim()).filter(Boolean);
+  const stateNames=Object.keys(US_STATE_NAMES).sort((a,b)=>b.length-a.length).map(x=>x.replace(/ /g,"\\s+")).join("|");
+  const locRx=new RegExp("([A-Za-z][A-Za-z .'-]{1,60}?),?\\s+("+stateNames+"|[A-Z]{2})\\s+(\\d{5}(?:-\\d{4})?)","i");
+  const streetLike=/\b(?:p\.?o\.?\s*box|street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|loop|terrace|ter\.?|broadway|suite|ste\.?)\b/i;
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i]; const m=line.match(locRx); if(!m)continue;
+    const state=structuredStateAbbrev(m[2]); if(!state)continue;
+    let city=m[1].trim().replace(/^[,;|•\s]+|[,;|•\s]+$/g,"");
+    let street="";
+    const prefix=line.slice(0,m.index).replace(/[,;|•\s]+$/g,"").trim();
+    if(prefix&&(/\d/.test(prefix)||streetLike.test(prefix)))street=prefix;
+    if(!street&&i>0){
+      const prev=lines[i-1];
+      if((/\d/.test(prev)||streetLike.test(prev))&&!cleanEmail(prev)&&!/^https?:|^www\./i.test(prev))street=prev;
+    }
+    // A one-line pipe address may have several street/address pieces before city.
+    if(street&&line.includes("|")&&m.index>0)street=prefix;
+    return {street,city,state,postalCode:m[3],countryOrRegion:"United States"};
+  }
+  return legacy;
+}
+
+function structuredCompanyEvidence(line){
+  const v=String(line||"").trim(); if(!v)return false;
+
+  // Whole-word company evidence only. Avoid job-title collisions:
+  // Designer != Design; Engineer != Engineers; Architect != Architects.
+  if(/\b(?:llc|l\.l\.c\.?|inc\.?|corp\.?|corporation|pllc|lp|llp|ltd\.?|company|construction|builders|building|architecture|architects|engineering|engineers|associates|group|studio|mechanical|electric|electrical|plumbing|design|contractors|concrete|masonry|garage|workshop|services|solutions|systems|enterprises|partners)\b/i.test(v))return true;
+  if(/(?:^|\s)co\.(?:\s|$)/i.test(v))return true;
+  if(v.length<=70&&/[A-Z]/.test(v)&&v===v.toUpperCase()&&v.split(/\s+/).length>=2&&!/\d{3}/.test(v))return true;
+  return false;
+}
+
+function structuredDomainKey(senderEmail,site){
+  let domain=cleanEmail(senderEmail).split("@")[1]||"";
+  if(!domain&&site){
+    try{domain=new URL(/^https?:\/\//i.test(site)?site:"https://"+site).hostname}catch(_){domain=""}
+  }
+  domain=String(domain||"").toLowerCase().replace(/^www\./,"").split(".")[0];
+  return domain.replace(/[^a-z0-9]/g,"");
+}
+
+function structuredCompanyLineKey(line){
+  return String(line||"")
+    .toLowerCase()
+    .replace(/\b(?:llc|l\.l\.c\.?|inc\.?|corp\.?|corporation|pllc|lp|llp|ltd\.?|company|co\.?)\b/g," ")
+    .replace(/[^a-z0-9]/g,"");
+}
+
+function structuredCompanyMatchesDomain(line,senderEmail,site){
+  const a=structuredCompanyLineKey(line);
+  const b=structuredDomainKey(senderEmail,site);
+  if(!a||!b||a.length<3||b.length<3)return false;
+  if(a===b)return true;
+  // Allow a modest legal/branding suffix difference, but not generic title substrings.
+  return a.length>=6&&b.length>=6&&(a.startsWith(b)||b.startsWith(a));
+}
+
+function structuredWebsiteLike(line){
+  const v=String(line||"").trim();
+  return /^(?:https?:\/\/|www\.)/i.test(v)||
+    /\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|net|org|co|us|io|biz|info)\b/i.test(v);
+}
+
+function structuredContactFromSignature(senderName,senderEmail,signatureText){
+  const sig=cleanSignatureText(signatureText);
+  const lines=norm(sig).split("\n").map(x=>String(x||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim()).filter(Boolean);
+  const senderLooksHuman=looksLikePersonName(senderName||"");
+  const resolvedName=senderLooksHuman?cleanName(senderName):inferPersonName(sig);
+  const assigned=new Set();
+  let nameLine=-1,companyLine=-1,titleLine=-1;
+  let titleValue="",companyValue="";
+
+  const site=website(sig,senderEmail);
+  const addr=structuredAddress(sig);
+  const ph=structuredPhones(sig);
+  const email=cleanEmail(senderEmail)||cleanEmail(sig);
+  const np=nameParts(resolvedName||"");
+  const socialNoise=/^(?:ig|instagram|facebook|linkedin|twitter|x)\b/i;
+
+  // Locate the person line.
+  for(let i=0;i<lines.length;i++){
+    const v=lines[i];
+    if(resolvedName&&v.toLowerCase().startsWith(resolvedName.toLowerCase())){
+      nameLine=i; assigned.add(i); break;
+    }
+    if(np.surname){
+      const rx=new RegExp("\\b"+np.surname.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\b","i");
+      if(rx.test(v)&&personNameFromLine(v)){nameLine=i;assigned.add(i);break}
+    }
+  }
+
+  // A delimited name line can carry either title or company.
+  if(nameLine>=0){
+    const pieces=lines[nameLine].split(/\s*(?:\||•|·|—|–)\s*/).map(x=>x.trim()).filter(Boolean);
+    if(pieces.length>1){
+      const rest=pieces.slice(1).join(" | ");
+      if(structuredCompanyMatchesDomain(rest,email,site)||structuredCompanyEvidence(rest)){
+        companyValue=rest;
+      }else if(rest){
+        titleValue=rest;
+      }
+    }
+  }
+
+  // Machine-identifiable lines are assigned before residual reasoning.
+  lines.forEach((v,i)=>{
+    if(i===nameLine)return;
+    if(cleanEmail(v)||structuredPhoneObservations(v).length||structuredWebsiteLike(v))assigned.add(i);
+    if(addr.postalCode&&v.includes(addr.postalCode))assigned.add(i);
+    if(addr.street&&v.toLowerCase().includes(addr.street.toLowerCase()))assigned.add(i);
+    if(socialNoise.test(v))assigned.add(i);
+  });
+
+  // Legacy title recognition remains useful, but it is no longer the only route.
+  if(!titleValue)titleValue=title(sig,resolvedName)||"";
+  if(titleValue){
+    for(let i=0;i<lines.length;i++){
+      if(i===nameLine)continue;
+      if(lines[i].toLowerCase()===titleValue.toLowerCase()){
+        titleLine=i;assigned.add(i);break;
+      }
+    }
+  }
+
+  // Company pass: domain agreement is strongest, then legal/entity evidence.
+  if(!companyValue){
+    const cc=[];
+    for(let i=0;i<lines.length;i++){
+      if(i===nameLine||assigned.has(i)||i===titleLine)continue;
+      const v=lines[i];
+      if(!v||isClosingPhrase(v)||cleanEmail(v)||structuredPhoneObservations(v).length||structuredWebsiteLike(v)||socialNoise.test(v))continue;
+      if(/\d{5}(?:-\d{4})?/.test(v)||/\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|broadway|suite|ste\.?|p\.?o\.?\s*box)\b/i.test(v))continue;
+      let score=0;
+      if(structuredCompanyMatchesDomain(v,email,site))score+=10;
+      if(structuredCompanyEvidence(v))score+=5;
+      if(v===v.toUpperCase()&&v.split(/\s+/).length>=2)score+=2;
+      if(nameLine>=0&&i>nameLine&&i<=nameLine+3)score+=1;
+      if(score>0)cc.push({i,v,score});
+    }
+    cc.sort((a,b)=>b.score-a.score||a.i-b.i);
+    if(cc.length){
+      companyValue=cc[0].v;companyLine=cc[0].i;assigned.add(companyLine);
+    }
+  }
+
+  // If the company came from the delimited name line, there is no separate line.
+  // If it came from a strong exact line, mark that line.
+  if(companyValue&&companyLine<0){
+    for(let i=0;i<lines.length;i++){
+      if(i===nameLine)continue;
+      if(lines[i].toLowerCase()===companyValue.toLowerCase()){
+        companyLine=i;assigned.add(i);break;
+      }
+    }
+  }
+
+  // SECOND PASS: inspect every remaining plausible text line for Title.
+  if(!titleValue){
+    const tc=[];
+    for(let i=0;i<lines.length;i++){
+      if(assigned.has(i)||i===companyLine||i===nameLine)continue;
+      const v=lines[i];
+      if(!v||isClosingPhrase(v)||cleanEmail(v)||structuredPhoneObservations(v).length||structuredWebsiteLike(v)||socialNoise.test(v))continue;
+      if(structuredCompanyMatchesDomain(v,email,site)||structuredCompanyEvidence(v))continue;
+      if(/\d{5}(?:-\d{4})?/.test(v)||/\b(?:street|road|avenue|boulevard|drive|lane|way|broadway|suite|p\.?o\.?\s*box)\b/i.test(v))continue;
+      if(v.length>85||(/[.!?]$/.test(v)&&v.split(/\s+/).length>7))continue;
+      let score=1;
+      if(nameLine>=0&&i>nameLine)score+=2;
+      if(companyLine>=0&&i<companyLine)score+=4;
+      if(i<=2)score+=1;
+      tc.push({i,v,score});
+    }
+    tc.sort((a,b)=>b.score-a.score||a.i-b.i);
+    if(tc.length){
+      titleValue=tc[0].v;titleLine=tc[0].i;assigned.add(titleLine);
+    }
+  }
+
+  // THIRD PASS: if Company is still blank, use remaining text before falling
+  // back to the email domain. This preserves exact brand casing such as WillScot.
+  if(!companyValue){
+    const cc=[];
+    for(let i=0;i<lines.length;i++){
+      if(assigned.has(i)||i===nameLine||i===titleLine)continue;
+      const v=lines[i];
+      if(!v||isClosingPhrase(v)||cleanEmail(v)||structuredPhoneObservations(v).length||structuredWebsiteLike(v)||socialNoise.test(v))continue;
+      if(/\d{5}(?:-\d{4})?/.test(v)||/\b(?:street|road|avenue|boulevard|drive|lane|way|broadway|suite|p\.?o\.?\s*box)\b/i.test(v))continue;
+      if(v.length>70||(/[.!?]$/.test(v)&&v.split(/\s+/).length>7))continue;
+      let score=0;
+      if(structuredCompanyMatchesDomain(v,email,site))score+=10;
+      if(structuredCompanyEvidence(v))score+=5;
+      if(titleLine>=0&&i>titleLine&&i<=titleLine+2)score+=2;
+      if(nameLine>=0&&i>nameLine&&i<=nameLine+3)score+=1;
+      if(score>0)cc.push({i,v,score});
+    }
+    cc.sort((a,b)=>b.score-a.score||a.i-b.i);
+    if(cc.length){
+      companyValue=cc[0].v;companyLine=cc[0].i;assigned.add(companyLine);
+    }
+  }
+
+  // Safe final company fallback: derive from sender's business domain, not from
+  // arbitrary leftover prose.
+  companyValue=companyValue||companyFromDomain(email,site)||"";
+
+  const result=Object.assign({},nameParts(resolvedName),{
+    companyName:companyValue,
+    jobTitle:String(titleValue||"").replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"").trim(),
+    email
+  },ph,{businessHomePage:site},addr,{signature:sig,personalNotes:sig});
+
+  result._debug={
+    structuredParser:true,
+    unassignedLines:lines.filter((_,i)=>!assigned.has(i))
+  };
+  return result;
+}
+
 function parseContactFromSignature(senderName,senderEmail,signatureText){
   const sig=cleanSignatureText(signatureText);
   const inferred=inferPersonName(sig);
@@ -1509,7 +1821,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.9.4 — stricter image-signature OCR classification.
+// v3.0.1 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -2417,7 +2729,18 @@ async function scan(){try{
   candidates=[...signatureCandidates,...referralCandidates]
     .sort((a,b)=>(a.globalStart??0)-(b.globalStart??0));
 
-  candidates=candidates.map(c=>{if(!c?.parsed)return c;const identity=c.name||[c.parsed.givenName,c.parsed.middleName,c.parsed.surname].filter(Boolean).join(" ");c.parsed.jobTitle=sanitizeJobTitle(c.parsed.jobTitle,identity,c.parsed.signature||"");c.parsed.personalNotes=c.parsed.signature||"";return c});
+  candidates=candidates.map(c=>{
+    if(!c?.parsed)return c;
+    if(c.candidateType!=="referral"){
+      const identity=c.name||[c.parsed.givenName,c.parsed.middleName,c.parsed.surname].filter(Boolean).join(" ");
+      const reparsed=structuredContactFromSignature(identity,c.email||c.parsed.email||"",c.parsed.signature||c.text||"");
+      // Preserve detector provenance while replacing only field interpretation.
+      reparsed._debug={...(c.parsed._debug||{}),...(reparsed._debug||{})};
+      c.parsed=reparsed;
+    }
+    c.parsed.personalNotes=c.parsed.signature||"";
+    return c
+  });
   renderCandidates();status(`Found ${candidates.length} contact choice${candidates.length===1?"":"s"}. Select one to process. Your own messages/signature are ignored.`,candidates.length?"ok":"error")
 }catch(e){status(e.message||String(e),"error")}}
 const APP_CLIENT_ID="aaaad2a2-1ca4-4d45-8b8d-21c56f2c4137";
