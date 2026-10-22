@@ -1509,7 +1509,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v2.9.2 — stricter image-signature OCR classification.
+// v2.9.3 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -2035,6 +2035,105 @@ function finalizeCandidate(c){
 }
 
 
+
+function recoverCurrentSenderNameCompanyCandidates(bodyText,currentName,currentEmail,myEmail){
+  const name=cleanName(currentName||"");
+  const email=cleanEmail(currentEmail||"");
+  if(!bodyText||!name||!email||sameEmail(email,myEmail)||!looksLikePersonName(name))return [];
+
+  const segments=allMessageSegments(bodyText,name,email);
+  const current=segments[0];
+  if(!current?.text)return [];
+
+  const lines=norm(current.text).split("\n");
+  const cleanLine=v=>String(v||"")
+    .replace(/[\u00ad\u200b-\u200d\ufeff]/g,"")
+    .replace(/\u00a0/g," ")
+    .replace(/\s+/g," ")
+    .trim();
+
+  const nameRx=new RegExp(
+    "^"+name.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\s*(?:\\||•|·|—|–)\\s*(.+)$",
+    "i"
+  );
+  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l);
+  const out=[];
+
+  for(let i=0;i<lines.length;i++){
+    const first=cleanLine(lines[i]);
+    if(!first)continue;
+
+    const m=first.match(nameRx);
+    if(!m)continue;
+
+    const companyPart=String(m[1]||"").trim();
+    const companyLow=" "+companyPart.toLowerCase();
+
+    // This fallback is specifically for "Name | Company", not "Name | Title".
+    // Require clear company evidence to avoid reclassifying ordinary delimited text.
+    if(!companyPart||!COMPANY_WORDS.some(w=>companyLow.includes(w)))continue;
+
+    const raw=[first];
+    let end=i;
+    let nonblank=1;
+
+    for(let j=i+1;j<Math.min(lines.length,i+25)&&nonblank<12;j++){
+      const v=cleanLine(lines[j]);
+      if(!v)continue;
+      if(isHeader(v))break;
+      if(/^[-_=]{5,}$/.test(v))continue;
+
+      // A second matching signature start is a new physical occurrence.
+      if(j>i&&nameRx.test(v))break;
+
+      raw.push(v);
+      end=j;
+      nonblank++;
+
+      // Stop once we have enough complete contact evidence and the next
+      // meaningful content would be outside this compact signature.
+      if(raw.length>=4){
+        const sigNow=cleanSignatureText(raw.join("\n"));
+        const ph=phones(sigNow);
+        const ad=address(sigNow);
+        if((ph.businessPhone||ph.mobilePhone) && ad.state && ad.postalCode){
+          // Keep looking only until a message header; this allows a website
+          // after the phone/address without leaking into quoted history.
+          continue;
+        }
+      }
+    }
+
+    const sig=cleanSignatureText(raw.join("\n"));
+    if(!sig||signatureEvidenceScore(raw)<5)continue;
+
+    const parsed=parseContactFromSignature(name,email,sig);
+    parsed.companyName=companyPart;
+    parsed.signature=sig;
+    parsed.personalNotes=sig;
+    parsed._debug={...(parsed._debug||{}),source:"Current sender name + company recovery"};
+
+    if(!parsed.givenName||!parsed.surname)continue;
+    if(!parsed.businessPhone&&!parsed.mobilePhone&&!parsed.street&&!parsed.businessHomePage)continue;
+
+    out.push({
+      score:100,
+      name,
+      email,
+      text:sig,
+      parsed,
+      candidateType:"signature",
+      physicalOccurrence:true,
+      occurrenceKey:`current-name-company:${current.start||0}:${i}:${end}`,
+      globalStart:(current.start||0)+i,
+      globalEnd:(current.start||0)+end
+    });
+  }
+
+  return out;
+}
+
+
 function recoverCurrentSenderSignatureCandidates(bodyText,currentName,currentEmail,myEmail){
   const email=cleanEmail(currentEmail||"");
   if(!bodyText||!email||sameEmail(email,myEmail))return [];
@@ -2245,6 +2344,19 @@ async function scan(){try{
   // an organization rather than the human signer.
   if(!signatureCandidates.length){
     signatureCandidates=recoverCurrentSenderSignatureCandidates(
+      textBody,
+      from.displayName||"",
+      from.emailAddress||"",
+      myEmail
+    );
+  }
+
+  // Separate fallback for signatures such as:
+  // "Susan Johnson | SJ Planning Solutions LLC"
+  // where the current sender email is known to Outlook but is not printed
+  // anywhere inside the signature itself.
+  if(!signatureCandidates.length){
+    signatureCandidates=recoverCurrentSenderNameCompanyCandidates(
       textBody,
       from.displayName||"",
       from.emailAddress||"",
