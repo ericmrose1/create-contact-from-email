@@ -1821,7 +1821,7 @@ function diagnosticPanel(parsed){
 
 
 
-// v3.0.1 — stricter image-signature OCR classification.
+// v3.0.2 — stricter image-signature OCR classification.
 // Normal text/HTML parsing still runs first. OCR is invoked only when no usable
 // contact candidate was found, which keeps ordinary emails fast.
 let __tesseractPromise=null;
@@ -2537,6 +2537,17 @@ function recoverCurrentSenderSignatureCandidates(bodyText,currentName,currentEma
 }
 
 
+
+function signatureDiscoveryText(body){
+  return norm(body).split("\n").map(line=>{
+    let v=String(line||"");
+    v=v.replace(/\s*<\s*(?:https?:\/\/|mailto:|tel:)[^>\r\n]*>\s*/gi," ");
+    v=v.replace(/\[([^\]]+)\]\((?:https?:\/\/|mailto:|tel:)[^)]+\)/gi,"$1");
+    v=v.replace(/\s*\(\s*(?:https?:\/\/|mailto:|tel:)[^)\r\n]*\)\s*/gi," ");
+    return v.replace(/[ \t]+$/g,"");
+  }).join("\n");
+}
+
 function enrichMissingExplicitAddressFromBody(candidate,bodyText){
   if(!candidate?.parsed)return candidate;
   const p=candidate.parsed;
@@ -2641,9 +2652,10 @@ async function scan(){try{
   const item=Office.context.mailbox.item;if(!item||item.itemType!==Office.MailboxEnums.ItemType.Message)throw new Error("Open or select an email message first.");
   const from=item.from||{},body=await readBody(item);const myEmail=(Office.context.mailbox.userProfile?.emailAddress||"").toLowerCase();
   const textBody=body.text||body.plainText||"";
+  const textSignatureBody=signatureDiscoveryText(textBody);
 
   // EXISTING SIGNATURE DETECTOR — unchanged.
-  const textSignatures=allPhysicalSignatureCandidates(textBody,from.displayName||"",from.emailAddress||"",myEmail);
+  const textSignatures=allPhysicalSignatureCandidates(textSignatureBody,from.displayName||"",from.emailAddress||"",myEmail);
 
   // NEW, independent detector for compact contact information intentionally
   // written into the message body by another sender.
@@ -2656,7 +2668,7 @@ async function scan(){try{
   // an organization rather than the human signer.
   if(!signatureCandidates.length){
     signatureCandidates=recoverCurrentSenderSignatureCandidates(
-      textBody,
+      textSignatureBody,
       from.displayName||"",
       from.emailAddress||"",
       myEmail
@@ -2669,7 +2681,7 @@ async function scan(){try{
   // anywhere inside the signature itself.
   if(!signatureCandidates.length){
     signatureCandidates=recoverCurrentSenderNameCompanyCandidates(
-      textBody,
+      textSignatureBody,
       from.displayName||"",
       from.emailAddress||"",
       myEmail
@@ -2677,13 +2689,14 @@ async function scan(){try{
   }
 
   const htmlVisible=body.html?htmlBodyToText(body.html):"";
+  const htmlSignatureVisible=signatureDiscoveryText(htmlVisible);
 
   // Text (including the narrow recovered Text cases) stays authoritative.
   // If Text yields nothing, apply the SAME recovery sequence to the HTML-visible
   // representation rather than dropping back to the general detector alone.
-  if(!signatureCandidates.length&&htmlVisible){
+  if(!signatureCandidates.length&&htmlSignatureVisible){
     signatureCandidates=allPhysicalSignatureCandidates(
-      htmlVisible,
+      htmlSignatureVisible,
       from.displayName||"",
       from.emailAddress||"",
       myEmail
@@ -2691,7 +2704,7 @@ async function scan(){try{
 
     if(!signatureCandidates.length){
       signatureCandidates=recoverCurrentSenderSignatureCandidates(
-        htmlVisible,
+        htmlSignatureVisible,
         from.displayName||"",
         from.emailAddress||"",
         myEmail
@@ -2700,7 +2713,7 @@ async function scan(){try{
 
     if(!signatureCandidates.length){
       signatureCandidates=recoverCurrentSenderNameCompanyCandidates(
-        htmlVisible,
+        htmlSignatureVisible,
         from.displayName||"",
         from.emailAddress||"",
         myEmail
@@ -2723,7 +2736,7 @@ async function scan(){try{
 
   // Additive address completion only when the detected contact has no address.
   // Prefer Outlook's Text body because it preserves the literal signature content.
-  const addressSource=textBody||htmlVisible||"";
+  const addressSource=textSignatureBody||htmlSignatureVisible||"";
   signatureCandidates=signatureCandidates.map(c=>enrichMissingExplicitAddressFromBody(c,addressSource));
 
   candidates=[...signatureCandidates,...referralCandidates]
