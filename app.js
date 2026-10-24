@@ -993,7 +993,8 @@ function v4FindCredentials(lines,resolvedName){
 function v4RecognizedNonFieldLine(line){
   const v=v4DisplayText(String(line||"")).replace(/\u00a0/g," ").replace(/\s+/g," ").trim();
   if(!v)return"blank";
-  if(/^[-_=|•·\s]+$/.test(v)||/^=+\s*[A-Z]?\s*=+$/.test(v))return"decorative";
+  if(/^[,;:|•·\s]+$/.test(v)||/^[-_=|•·\s]+$/.test(v)||/^=+\s*[A-Z]?\s*=+$/.test(v))return"decorative";
+  if(/^(?:T|P|O|M|C|D|F|E|W)\s*:$/i.test(v))return"contact label";
   if(/^\[?external\]?$/i.test(v))return"system banner";
   if(/^(?:ig|instagram|facebook|linkedin|twitter|x|houzz|vimeo)\b/i.test(v))return"social media";
   if(/\b(?:instagram|facebook|linkedin|vimeo|houzz)\b/i.test(v)&&/[|•▪]/.test(v))return"social media";
@@ -1084,6 +1085,41 @@ function v4AuditSignature(signatureText,parsed,resolvedName,credentials){
   return{recognizedNonField:recognized,unaccounted:unique,unaccountedText:unique.map(x=>x.text).join("\n")};
 }
 
+
+function v4CompanyFromDomain(senderEmail,site){
+  let domain=cleanEmail(senderEmail).split("@")[1]||"";
+  if(!domain&&site){
+    try{domain=new URL(/^https?:\/\//i.test(site)?site:"https://"+site).hostname}catch(_){domain=""}
+  }
+  domain=String(domain||"").toLowerCase().replace(/^www\./,"");
+  if(!domain||/^(?:gmail|outlook|hotmail|live|icloud|me|aol|yahoo|protonmail|msn)\./i.test(domain))return"";
+  let stem=(domain.split(".")[0]||"").replace(/[-_]+/g," ").trim();
+  if(!stem)return"";
+
+  // Domains often concatenate brand + industry word. Split a broad but finite
+  // set of common organization suffixes while preserving the brand stem.
+  if(!/\s/.test(stem)){
+    const suffixes=[
+      "technologies","technology","environmental","engineering","architecture",
+      "construction","contractors","contractor","concrete","electrical","electric",
+      "mechanical","plumbing","planning","solutions","services","systems","rentals",
+      "equipment","builders","building","design","studio","consulting","consultants",
+      "management","development","developers","properties","industries","industrial",
+      "workshop","garage"
+    ].sort((a,b)=>b.length-a.length);
+    for(const s of suffixes){
+      if(stem.endsWith(s)&&stem.length>s.length+1){
+        stem=stem.slice(0,-s.length)+" "+s;
+        break;
+      }
+    }
+  }
+  return stem.split(/\s+/).filter(Boolean).map(w=>{
+    if(w.length<=2)return w.toUpperCase();
+    return w.charAt(0).toUpperCase()+w.slice(1);
+  }).join(" ");
+}
+
 function v4ResidualTitleCompany(parsed,signatureText,resolvedName,credentials){
   const sig=v4VisibleSignatureBlock(signatureText);
   const lines=norm(sig).split("\n").map(x=>String(x||"").replace(/\s+/g," ").trim()).filter(Boolean);
@@ -1123,13 +1159,33 @@ function v4ResidualTitleCompany(parsed,signatureText,resolvedName,credentials){
     return{...a,score};
   }).filter(a=>a.score>0).sort((a,b)=>b.score-a.score||a.i-b.i);
 
-  // Credentials are name material, never company material.
+  // Credentials and role text are never company material.
   if(parsed.companyName&&v4CredentialList(parsed.companyName).length)parsed.companyName="";
-  const currentCompany=String(parsed.companyName||"");
-  const currentStrong=structuredCompanyEvidence(currentCompany)||structuredCompanyMatchesDomain(currentCompany,email,site);
+  if(parsed.companyName&&parsed.jobTitle&&
+     parsed.companyName.trim().toLowerCase()===parsed.jobTitle.trim().toLowerCase())
+    parsed.companyName="";
+
+  let currentCompany=String(parsed.companyName||"");
+  let currentStrong=structuredCompanyEvidence(currentCompany)||structuredCompanyMatchesDomain(currentCompany,email,site);
+
+  // If the current company looks like a human role and has no organization/domain
+  // evidence, discard it and let the whole-block evidence choose again.
+  if(currentCompany&&!currentStrong&&structuredPlausibleTitleText(currentCompany)){
+    parsed.companyName="";
+    currentCompany="";
+    currentStrong=false;
+  }
+
   if(companies.length&&(!currentCompany||!currentStrong)){
     parsed.companyName=companies[0].line.includes("|")&&structuredCompanyMatchesDomain(companies[0].line,email,site)
       ? companies[0].line : companies[0].text;
+  }
+
+  // Some signatures use only a logo/website for the company. If no explicit
+  // company survives, infer the organization from the sender/site domain.
+  if(!parsed.companyName){
+    const inferredCompany=v4CompanyFromDomain(email,site);
+    if(inferredCompany)parsed.companyName=inferredCompany;
   }
 
   if(parsed.jobTitle){
@@ -1166,6 +1222,54 @@ function v4FillPartialAddress(parsed,signatureText){
   const lines=norm(signatureText).split("\n")
     .map(x=>String(x||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim())
     .filter(Boolean);
+
+  const isSeparator=x=>/^[,;|•·]+$/.test(String(x||"").trim())||/^[-_=]{5,}$/.test(String(x||"").trim());
+  const meaningfulBefore=i=>{
+    const out=[];
+    for(let j=i-1;j>=0&&out.length<4;j--){
+      if(!lines[j]||isSeparator(lines[j]))continue;
+      out.push(lines[j]);
+    }
+    return out;
+  };
+  const meaningfulAfter=i=>{
+    const out=[];
+    for(let j=i+1;j<lines.length&&out.length<3;j++){
+      if(!lines[j]||isSeparator(lines[j]))continue;
+      out.push(lines[j]);
+    }
+    return out;
+  };
+
+  // Fragmented Outlook address layout:
+  //   255 E. Anderson Street
+  //   ,
+  //   Idaho Falls
+  //   ,
+  //   ID 83401
+  //   ,
+  //   United States
+  for(let i=0;i<lines.length;i++){
+    const m=lines[i].match(/^([A-Za-z]{2,30})\s+(\d{5}(?:-\d{4})?)$/);
+    if(!m)continue;
+    const st=structuredStateAbbrev(m[1]);
+    if(!st)continue;
+    const prev=meaningfulBefore(i);
+    const city=prev[0]||"";
+    const street=prev[1]||"";
+    const streetLike=/\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|place|pl\.?|loop|terrace|ter\.?|highway|hwy\.?|broadway|p\.?o\.?\s*box)\b/i;
+    if(street&&city&&/\d/.test(street)&&streetLike.test(street)&&
+       /^[A-Za-z][A-Za-z .'-]{1,60}$/.test(city)){
+      parsed.street=parsed.street||street.trim();
+      parsed.city=parsed.city||city.trim();
+      parsed.state=parsed.state||st;
+      parsed.postalCode=parsed.postalCode||m[2];
+      const after=meaningfulAfter(i);
+      if(after.some(x=>/^United States(?: of America)?$/i.test(x))||st)
+        parsed.countryOrRegion=parsed.countryOrRegion||"United States";
+      if(parsed.street&&parsed.city&&parsed.state)return parsed;
+    }
+  }
 
   for(const line of lines){
     if(cleanEmail(line)||structuredPhoneObservations(line).length||structuredWebsiteLike(line))continue;
@@ -1244,6 +1348,34 @@ function v4ContactFromSignature(senderName,senderEmail,signatureText){
   return base;
 }
 
+
+function v4LikelyAddressContinuation(lines,index){
+  const clean=i=>String(lines[i]||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim();
+  const v=clean(index);
+  if(!v)return false;
+  if(/^[,;]+$/.test(v))return true;
+  if(/^United States(?: of America)?$/i.test(v))return true;
+  if(/^([A-Za-z]{2,30})\\s+\\d{5}(?:-\\d{4})?$/.test(v) &&
+     structuredStateAbbrev(v.match(/^([A-Za-z]{2,30})/)[1]))return true;
+  if(/\\d/.test(v)&&/\\b(?:street|st\\.?|road|rd\\.?|avenue|ave\\.?|boulevard|blvd\\.?|drive|dr\\.?|lane|ln\\.?|way|court|ct\\.?|place|pl\\.?|loop|terrace|ter\\.?|highway|hwy\\.?|broadway|p\\.?o\\.?\\s*box)\\b/i.test(v))return true;
+
+  // City fragment between a street line and a state/ZIP line.
+  if(/^[A-Za-z][A-Za-z .'-]{1,60}$/.test(v)){
+    let prev="",next="";
+    for(let j=index-1;j>=0;j--){
+      const x=clean(j); if(!x||/^[,;]+$/.test(x))continue; prev=x; break;
+    }
+    for(let j=index+1;j<lines.length;j++){
+      const x=clean(j); if(!x||/^[,;]+$/.test(x))continue; next=x; break;
+    }
+    const prevStreet=/\\d/.test(prev)&&/\\b(?:street|st\\.?|road|rd\\.?|avenue|ave\\.?|boulevard|blvd\\.?|drive|dr\\.?|lane|ln\\.?|way|court|ct\\.?|place|pl\\.?|loop|terrace|ter\\.?|highway|hwy\\.?|broadway|p\\.?o\\.?\\s*box)\\b/i.test(prev);
+    const nextState=/^([A-Za-z]{2,30})\\s+\\d{5}(?:-\\d{4})?$/.test(next) &&
+      structuredStateAbbrev(next.match(/^([A-Za-z]{2,30})/)[1]);
+    if(prevStreet&&nextState)return true;
+  }
+  return false;
+}
+
 function v4SignatureTailCategory(line){
   const v=String(line||"").trim();
   if(!v)return"";
@@ -1279,12 +1411,29 @@ function v4AttachOriginalSignatureBlock(body,candidate){
   }
 
   let finalEnd=end;
-  for(let j=end+1;j<Math.min(lines.length,end+16);j++){
+  for(let j=end+1;j<Math.min(lines.length,end+28);j++){
     const v=String(lines[j]||"").trim();
     if(!v)continue;
-    if(/^\s*(?:from|sent|to|cc|bcc|subject):\s*/i.test(v)||/^[-_]{5,}$/.test(v))break;
-    if(!v4SignatureTailCategory(v))break;
-    finalEnd=j;
+    if(/^\s*(?:from|sent|to|cc|bcc|subject):\s*/i.test(v))break;
+
+    // A decorative divider immediately before a quoted-message header is not
+    // part of the signature. Otherwise decorative lines may be intentional
+    // signature design and can precede a website/logo footer.
+    if(/^[-_]{5,}$/.test(v)){
+      let next="";
+      for(let k=j+1;k<Math.min(lines.length,j+8);k++){
+        const x=String(lines[k]||"").trim(); if(!x)continue; next=x; break;
+      }
+      if(/^\s*(?:from|sent|to|cc|bcc|subject):\s*/i.test(next))break;
+      finalEnd=j;
+      continue;
+    }
+
+    if(v4SignatureTailCategory(v)||v4LikelyAddressContinuation(lines,j)){
+      finalEnd=j;
+      continue;
+    }
+    break;
   }
   const block=signatureDiscoveryText(lines.slice(start,finalEnd+1).join("\n")).replace(/^\s*\n+|\n+\s*$/g,"");
   candidate.rawSignatureBlock=block||v4VisibleSignatureBlock(candidate.parsed.signature||candidate.text||"");
