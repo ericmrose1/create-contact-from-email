@@ -32,11 +32,18 @@
 
   .diagnostic{margin:10px 0;padding:8px;border:1px solid #bf8700;border-radius:8px;background:#fffdf2}.diagnostic summary{cursor:pointer;font-weight:700;font-size:12px}.diagnostic:not([open]){background:transparent;border-color:#d0d7de;padding:6px 8px}.diag-source{margin:7px 0;color:#6e7781;font-size:11px}.diag-row{display:grid;grid-template-columns:120px 1fr;gap:8px;padding:3px 0;font-size:11px;border-bottom:1px solid #eee}.diag-block{margin-top:8px;font-size:11px}.diag-block pre{white-space:pre-wrap;word-break:break-word;background:#fff;border:1px solid #d8dee4;border-radius:5px;padding:6px;max-height:180px;overflow:auto;margin:4px 0 8px}
 
+
+    .unaccounted{margin:9px 0;padding:8px;border:1px solid #d0d7de;border-radius:8px;background:#f8fafc}
+    .unaccounted.has-content{border-color:#bf8700;background:#fffdf2}
+    .unaccounted.clear{border-color:#1a7f37;background:#f0fff4}
+    .unaccounted-title{font-size:11px;font-weight:700;color:#57606a;margin-bottom:4px;text-transform:uppercase;letter-spacing:.02em}
+    .unaccounted textarea{width:100%;min-height:56px;padding:7px;border:1px solid #b8c0c8;border-radius:6px;background:#fff;font:11px/1.35 "Segoe UI",Arial,sans-serif;resize:vertical}
+
 </style>
 </head>
 <body>
   <h1>Create Contact from Email</h1>
-  <div class="sub"><b>v3.0.2</b> — Finds each signature occurrence in the current email chain, lets you select one, and checks Outlook Contacts before creating or updating anything.</div>
+  <div class="sub"><b>v4.0.0</b> — Finds each signature occurrence in the current email chain, lets you select one, and checks Outlook Contacts before creating or updating anything.</div>
   <div id="status" class="status">Scanning the open email…</div>
 
   <div id="authSetup" class="setup" hidden>
@@ -63,6 +70,6 @@
     <div class="note">The add-in never deletes an existing value because it is missing from an email signature. When a new nonblank value conflicts with an existing nonblank value, replacement is left unchecked until you approve it.</div>
   </section>
 
-  <script type="module" src="app.js?v=302"></script>
+  <script type="module" src="app.js?v=400"></script>
 </body>
 </html>
