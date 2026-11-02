@@ -1033,10 +1033,32 @@ function v4AuditSignature(signatureText,parsed,resolvedName,credentials){
   const emailRx=/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
   const urlRx=/(?:https?:\/\/|www\.)[^\s|]+|\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|net|org|co|us|io|biz|info)\b/gi;
 
+  const addressDecision=parsed._addressDecision||null;
+  const normAuditLine=v=>String(v||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim();
+
   for(const line of lines){
+    if(addressDecision?.branchLine&&
+       normAuditLine(line).toLowerCase()===normAuditLine(addressDecision.branchLine).toLowerCase()){
+      recognized.push({text:line,category:"branch/address selector"});
+      continue;
+    }
+
+    const alternate=addressDecision?.alternatives?.find(a=>
+      normAuditLine(a.rawLine).toLowerCase()===normAuditLine(line).toLowerCase()
+    );
+    if(alternate){
+      unaccounted.push({line,text:line});
+      continue;
+    }
+
     const nonField=v4RecognizedNonFieldLine(line);
     if(nonField){recognized.push({text:line,category:nonField});continue}
     let residue=line;
+
+    const selectedAddress=addressDecision?.selected;
+    if(selectedAddress&&selectedAddress.label&&
+       normAuditLine(selectedAddress.rawLine).toLowerCase()===normAuditLine(line).toLowerCase())
+      residue=v4RemoveCI(residue,selectedAddress.label);
 
     // Strip machine-identifiable spans before textual fields so a company
     // name inside an email/domain is not removed first and turned into residue.
@@ -1105,7 +1127,7 @@ function v4CompanyFromDomain(senderEmail,site){
       "mechanical","plumbing","planning","solutions","services","systems","rentals",
       "equipment","builders","building","design","studio","consulting","consultants",
       "management","development","developers","properties","industries","industrial",
-      "workshop","garage"
+      "workshop","garage","sealants","sealant","waterproofing"
     ].sort((a,b)=>b.length-a.length);
     for(const s of suffixes){
       if(stem.endsWith(s)&&stem.length>s.length+1){
@@ -1151,7 +1173,9 @@ function v4ResidualTitleCompany(parsed,signatureText,resolvedName,credentials){
   };
   const candidates=atoms.filter(a=>!isIdentity(a)&&!machine(a)&&structuredPlausibleTitleText(a.text));
 
-  const companies=candidates.map(a=>{
+  const companies=candidates.filter(a=>
+    !(v4RecognizedNonFieldLine(a.line)&&!structuredCompanyMatchesDomain(a.line,email,site))
+  ).map(a=>{
     let score=0;
     if(structuredCompanyMatchesDomain(a.text,email,site))score+=12;
     if(structuredCompanyEvidence(a.text))score+=6;
@@ -1159,8 +1183,11 @@ function v4ResidualTitleCompany(parsed,signatureText,resolvedName,credentials){
     return{...a,score};
   }).filter(a=>a.score>0).sort((a,b)=>b.score-a.score||a.i-b.i);
 
-  // Credentials and role text are never company material.
+  // Credentials, office-location footers, marketing lines and role text
+  // are never company material.
   if(parsed.companyName&&v4CredentialList(parsed.companyName).length)parsed.companyName="";
+  if(parsed.companyName&&v4RecognizedNonFieldLine(parsed.companyName)&&
+     !structuredCompanyMatchesDomain(parsed.companyName,email,site))parsed.companyName="";
   if(parsed.companyName&&parsed.jobTitle&&
      parsed.companyName.trim().toLowerCase()===parsed.jobTitle.trim().toLowerCase())
     parsed.companyName="";
@@ -1183,9 +1210,21 @@ function v4ResidualTitleCompany(parsed,signatureText,resolvedName,credentials){
 
   // Some signatures use only a logo/website for the company. If no explicit
   // company survives, infer the organization from the sender/site domain.
+  const inferredCompany=v4CompanyFromDomain(email,site);
   if(!parsed.companyName){
-    const inferredCompany=v4CompanyFromDomain(email,site);
     if(inferredCompany)parsed.companyName=inferredCompany;
+  }else if(inferredCompany){
+    const companyKey=structuredCompanyLineKey(parsed.companyName);
+    const inferredKey=structuredCompanyLineKey(inferredCompany);
+    const explicitCompanyLine=lines.some(line=>{
+      if(cleanEmail(line)||structuredWebsiteLike(line)||structuredPhoneObservations(line).length)return false;
+      const parts=structuredDelimitedParts(line);
+      return structuredCompanyLineKey(line)===companyKey ||
+        parts.some(part=>structuredCompanyLineKey(part)===companyKey);
+    });
+    if(!explicitCompanyLine&&companyKey&&companyKey===inferredKey&&
+       !/[\s|,&]/.test(parsed.companyName))
+      parsed.companyName=inferredCompany;
   }
 
   if(parsed.jobTitle){
@@ -1202,6 +1241,7 @@ function v4ResidualTitleCompany(parsed,signatureText,resolvedName,credentials){
   if(!parsed.jobTitle){
     const companyLine=lines.findIndex(x=>parsed.companyName&&x.toLowerCase().includes(parsed.companyName.toLowerCase()));
     const titles=candidates.filter(a=>{
+      if(v4RecognizedNonFieldLine(a.line))return false;
       if(parsed.companyName&&(a.text.toLowerCase()===parsed.companyName.toLowerCase()||a.line.toLowerCase()===parsed.companyName.toLowerCase()))return false;
       if(structuredCompanyEvidence(a.text)||structuredCompanyMatchesDomain(a.text,email,site))return false;
       return true;
@@ -1318,6 +1358,123 @@ function v4FillPartialAddress(parsed,signatureText){
   return parsed;
 }
 
+
+function v402NormalizeOfficeKey(value){
+  return String(value||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+}
+
+function v402OfficeAddressCandidates(signatureText){
+  const lines=norm(v4VisibleSignatureBlock(signatureText)).split("\n")
+    .map(x=>String(x||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim());
+
+  const stateNames=Object.keys(US_STATE_NAMES)
+    .sort((a,b)=>b.length-a.length)
+    .map(x=>x.replace(/ /g,"\\s+"))
+    .join("|");
+  const commaRx=new RegExp(
+    "^(.+?)\\s*,\\s*([A-Za-z][A-Za-z .'-]{1,60})\\s*,?\\s*("+stateNames+"|[A-Z]{2})\\s+(\\d{5}(?:-\\d{4})?)\\s*$",
+    "i"
+  );
+  const suffixRx=new RegExp(
+    "^(.+?\\b(?:street|st\\.?|road|rd\\.?|avenue|ave\\.?|boulevard|blvd\\.?|drive|dr\\.?|lane|ln\\.?|way|court|ct\\.?|place|pl\\.?|loop|terrace|ter\\.?|highway|hwy\\.?))\\s+([A-Za-z][A-Za-z .'-]{1,60})\\s*,\\s*("+stateNames+"|[A-Z]{2})\\s+(\\d{5}(?:-\\d{4})?)\\s*$",
+    "i"
+  );
+
+  const out=[];
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    if(!line||cleanEmail(line)||structuredPhoneObservations(line).length)continue;
+    let m=line.match(commaRx);
+    if(!m)m=line.match(suffixRx);
+    if(!m)continue;
+    const state=structuredStateAbbrev(m[3]);
+    if(!state)continue;
+
+    const prefix=m[1].trim().replace(/[,\s]+$/g,"");
+    const start=prefix.search(/(?:p\.?o\.?\s*box|\d)/i);
+    if(start<0)continue;
+
+    const label=prefix.slice(0,start).trim().replace(/[\s|:;,-]+$/g,"");
+    const street=prefix.slice(start).trim().replace(/[,\s]+$/g,"");
+    if(!street||!/\d/.test(street))continue;
+
+    out.push({
+      lineIndex:i,rawLine:line,label,street,
+      city:m[2].trim(),state,postalCode:m[4],countryOrRegion:"United States"
+    });
+  }
+  return out;
+}
+
+function v402BranchContext(signatureText,resolvedName){
+  const lines=norm(v4VisibleSignatureBlock(signatureText)).split("\n")
+    .map(x=>String(x||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim());
+
+  let nameIndex=-1;
+  const surname=nameParts(resolvedName||"").surname||"";
+  for(let i=0;i<lines.length;i++){
+    const v=lines[i];
+    if(!v)continue;
+    if(resolvedName&&nameMatchesIdentity(v,resolvedName)){nameIndex=i;break}
+    if(surname&&new RegExp("\\b"+surname.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\b","i").test(v)&&personNameFromLine(v)){
+      nameIndex=i;break;
+    }
+  }
+
+  const start=nameIndex>=0?nameIndex+1:0;
+  const end=Math.min(lines.length,start+8);
+  for(let i=start;i<end;i++){
+    const v=lines[i];
+    if(!v)continue;
+    const m=v.match(/^(.{2,50}?)\s+(?:Branch|Office|Location)$/i);
+    if(m)return {line:v,name:m[1].trim(),key:v402NormalizeOfficeKey(m[1])};
+  }
+  return {line:"",name:"",key:""};
+}
+
+function v402SelectOfficeAddress(parsed,signatureText,resolvedName){
+  const candidates=v402OfficeAddressCandidates(signatureText);
+  if(candidates.length<2)return parsed;
+
+  const branch=v402BranchContext(signatureText,resolvedName);
+  let selected=null;
+
+  if(branch.key){
+    const scored=candidates.map(c=>{
+      const lk=v402NormalizeOfficeKey(c.label);
+      const ck=v402NormalizeOfficeKey(c.city);
+      let score=0;
+      if(lk===branch.key)score=100;
+      else if(lk&&lk.split(" ").includes(branch.key))score=95;
+      else if(lk&&lk.includes(branch.key))score=90;
+      else if(ck===branch.key)score=80;
+      return {c,score};
+    }).sort((a,b)=>b.score-a.score||a.c.lineIndex-b.c.lineIndex);
+    if(scored[0]?.score>0)selected=scored[0].c;
+  }
+
+  if(!selected)selected=candidates.find(c=>/\bmain\b/i.test(c.label))||null;
+
+  if(!selected&&parsed.street){
+    const ps=v402NormalizeOfficeKey(parsed.street);
+    selected=candidates.find(c=>v402NormalizeOfficeKey(c.street)===ps)||null;
+  }
+
+  if(!selected)selected=candidates[0];
+
+  parsed.street=selected.street;
+  parsed.city=selected.city;
+  parsed.state=selected.state;
+  parsed.postalCode=selected.postalCode;
+  parsed.countryOrRegion=selected.countryOrRegion;
+  parsed._addressDecision={
+    branchLine:branch.line,branchName:branch.name,selected,
+    alternatives:candidates.filter(c=>c!==selected)
+  };
+  return parsed;
+}
+
+
 function v4ContactFromSignature(senderName,senderEmail,signatureText){
   const original=v4VisibleSignatureBlock(signatureText);
   const base=structuredContactFromSignature(senderName,senderEmail,original);
@@ -1327,6 +1484,7 @@ function v4ContactFromSignature(senderName,senderEmail,signatureText){
   const resolvedName=senderLooksHuman?cleanName(senderName):(inferred||"");
   const credentials=v4FindCredentials(norm(original).split("\n"),resolvedName);
 
+  v402SelectOfficeAddress(base,original,resolvedName);
   v4ResidualTitleCompany(base,original,resolvedName,credentials);
 
   const np=nameParts(resolvedName||[base.givenName,base.middleName,base.surname].filter(Boolean).join(" "));
@@ -1355,11 +1513,16 @@ function v4LikelyAddressContinuation(lines,index){
   if(!v)return false;
   if(/^[,;]+$/.test(v))return true;
   if(/^United States(?: of America)?$/i.test(v))return true;
-  if(/^([A-Za-z]{2,30})\\s+\\d{5}(?:-\\d{4})?$/.test(v) &&
-     structuredStateAbbrev(v.match(/^([A-Za-z]{2,30})/)[1]))return true;
-  if(/\\d/.test(v)&&/\\b(?:street|st\\.?|road|rd\\.?|avenue|ave\\.?|boulevard|blvd\\.?|drive|dr\\.?|lane|ln\\.?|way|court|ct\\.?|place|pl\\.?|loop|terrace|ter\\.?|highway|hwy\\.?|broadway|p\\.?o\\.?\\s*box)\\b/i.test(v))return true;
 
-  // City fragment between a street line and a state/ZIP line.
+  const stateZip=v.match(/^([A-Za-z]{2,30})\s+(\d{5}(?:-\d{4})?)$/);
+  if(stateZip&&structuredStateAbbrev(stateZip[1]))return true;
+
+  const streetLike=/\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|place|pl\.?|loop|terrace|ter\.?|highway|hwy\.?|broadway|p\.?o\.?\s*box)\b/i;
+  if(/\d/.test(v)&&streetLike.test(v))return true;
+
+  if(/\d/.test(v)&&/,\s*[A-Za-z][A-Za-z .'-]{1,60}\s*,?\s*[A-Za-z]{2,30}\s+\d{5}(?:-\d{4})?\s*$/.test(v))
+    return true;
+
   if(/^[A-Za-z][A-Za-z .'-]{1,60}$/.test(v)){
     let prev="",next="";
     for(let j=index-1;j>=0;j--){
@@ -1368,9 +1531,9 @@ function v4LikelyAddressContinuation(lines,index){
     for(let j=index+1;j<lines.length;j++){
       const x=clean(j); if(!x||/^[,;]+$/.test(x))continue; next=x; break;
     }
-    const prevStreet=/\\d/.test(prev)&&/\\b(?:street|st\\.?|road|rd\\.?|avenue|ave\\.?|boulevard|blvd\\.?|drive|dr\\.?|lane|ln\\.?|way|court|ct\\.?|place|pl\\.?|loop|terrace|ter\\.?|highway|hwy\\.?|broadway|p\\.?o\\.?\\s*box)\\b/i.test(prev);
-    const nextState=/^([A-Za-z]{2,30})\\s+\\d{5}(?:-\\d{4})?$/.test(next) &&
-      structuredStateAbbrev(next.match(/^([A-Za-z]{2,30})/)[1]);
+    const prevStreet=/\d/.test(prev)&&streetLike.test(prev);
+    const nm=next.match(/^([A-Za-z]{2,30})\s+\d{5}(?:-\d{4})?$/);
+    const nextState=!!(nm&&structuredStateAbbrev(nm[1]));
     if(prevStreet&&nextState)return true;
   }
   return false;
