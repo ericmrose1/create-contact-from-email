@@ -16,6 +16,19 @@ function norm(s){return (s||"").replace(/\r\n/g,"\n").replace(/\r/g,"\n").replac
 function cleanEmail(s){const m=(s||"").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);return m?m[0].toLowerCase():""}
 function cleanName(s){return (s||"").replace(/<[^>]+>/g,"").replace(/\([^)]*\)/g,"").replace(/["']/g,"").trim().replace(/\s+/g," ")}
 function nameParts(display){let n=cleanName(display);if(n.includes(",")){const a=n.split(",",2).map(x=>x.trim());n=(a[1]+" "+a[0]).trim()}const t=n.split(/\s+/).filter(Boolean).filter(x=>!CREDENTIALS.has(x.toUpperCase()));if(!t.length)return{givenName:"",middleName:"",surname:""};if(t.length===1)return{givenName:t[0],middleName:"",surname:""};if(t.length===2)return{givenName:t[0],middleName:"",surname:t[1]};return{givenName:t[0],middleName:t.slice(1,-1).join(" "),surname:t[t.length-1]}}
+function structuredResolvedName(senderName,signatureText){
+  const sender=cleanName(senderName||"");
+  const inferred=cleanName(inferPersonName(signatureText)||"");
+  if(!inferred)return looksLikePersonName(sender)?sender:"";
+  if(!looksLikePersonName(sender))return inferred;
+  const tokens=v=>cleanName(v).toLowerCase().match(/[a-z0-9]+/g)||[];
+  const a=tokens(sender),b=tokens(inferred);
+  // The visible signature is authoritative for name order when it contains
+  // the same name tokens as Outlook's sender metadata (which is often
+  // stored/displayed as Last First).
+  if(a.length>=2&&a.length===b.length&&[...a].sort().join("|")===[...b].sort().join("|"))return inferred;
+  return sender;
+}
 function phoneForOutlook(value){
   const raw=String(value||"").trim();if(!raw)return"";
   const extMatch=raw.match(/(?:^|\s)(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+)\s*$/i);
@@ -696,22 +709,22 @@ function structuredPhoneObservations(sig){
     if(/^(?:direct\s*[/&+\-]\s*text|direct text|text\s*[/&+\-]\s*direct)$/.test(t))return"directtext";
     if(/^(?:fax|f)$/.test(t))return"fax";
     if(/^(?:mobile|cell|cellular|m|c)$/.test(t))return"mobile";
-    if(/^(?:office|business|work|main|telephone|phone|tel|p|o)$/.test(t))return"business";
+    if(/^(?:office|business|work|main|telephone|phone|tel|p|o|b|w)$/.test(t))return"business";
     if(/^(?:direct|d)$/.test(t))return"direct";
     return"";
   };
 
   const prefixLabel=segment=>{
     const s=String(segment||"");
-    const m=s.match(/(?:^|[|•;,]\s*|\s+)(direct\s*[/&+\-]\s*text|direct text|text\s*[/&+\-]\s*direct|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|[POMCFD])\s*[:.\-]?\s*$/i);
+    const m=s.match(/(?:^|[|•;,]\s*|\s+)(direct\s*[/&+\-]\s*text|direct text|text\s*[/&+\-]\s*direct|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|[PBOMCFDW])\s*[:.\-]?\s*$/i);
     return m?tokenLabel(m[1]):"";
   };
 
   const suffixLabel=segment=>{
     const s=String(segment||"");
-    let m=s.match(/^\s*\(\s*(direct\s*[/&+\-]\s*text|direct text|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|[OMCFD])\s*\)/i);
+    let m=s.match(/^\s*(?:[|•;,]\s*)?\(\s*(direct\s*[/&+\-]\s*text|direct text|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|[BOMCFDW])\s*\)/i);
     if(m)return tokenLabel(m[1]);
-    m=s.match(/^\s*(direct\s*[/&+\-]\s*text|direct text|mobile|cell|cellular|fax|direct)\b(?!\s*:)/i);
+    m=s.match(/^\s*(?:[|•;,]\s*)?(direct\s*[/&+\-]\s*text|direct text|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|[BOMCFDW])\b(?!\s*:)/i);
     return m?tokenLabel(m[1]):"";
   };
 
@@ -773,11 +786,16 @@ function structuredPhones(sig){
   // If only an explicit mobile existed, a remaining unlabeled number is Business.
   if(!out.businessPhone){for(const o of unlabeled)take("businessPhone",o)}
 
-  // Preserve old parser only as a gap filler, never overriding relational assignments.
-  const legacy=phones(sig);
-  if(!out.businessPhone)out.businessPhone=legacy.businessPhone||"";
-  if(!out.mobilePhone)out.mobilePhone=legacy.mobilePhone||"";
-  if(!out.businessFax)out.businessFax=legacy.businessFax||"";
+  // Explicit/relational observations are authoritative. Never let the legacy
+  // parser reclassify a number that already carried an Office/Business,
+  // Mobile/Cell, or Fax label. Use legacy parsing only when no structured
+  // phone observation was possible at all.
+  if(!obs.length){
+    const legacy=phones(sig);
+    out.businessPhone=legacy.businessPhone||"";
+    out.mobilePhone=legacy.mobilePhone||"";
+    out.businessFax=legacy.businessFax||"";
+  }
   if(out.businessPhone===out.mobilePhone)out.mobilePhone="";
   if(out.businessPhone===out.businessFax)out.businessFax="";
   return out;
@@ -788,7 +806,7 @@ function structuredAddress(sig){
   if(legacy.street&&legacy.city&&legacy.state&&legacy.postalCode)return legacy;
   const lines=norm(sig).split("\n").map(x=>String(x||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim()).filter(Boolean);
   const stateNames=Object.keys(US_STATE_NAMES).sort((a,b)=>b.length-a.length).map(x=>x.replace(/ /g,"\\s+")).join("|");
-  const locRx=new RegExp("([A-Za-z][A-Za-z .'-]{1,60}?),?\\s+("+stateNames+"|[A-Z]{2})\\s+(\\d{5}(?:-\\d{4})?)","i");
+  const locRx=new RegExp("([A-Za-z][A-Za-z .'-]{1,60}?),?\\s+("+stateNames+"|[A-Z]{2})\\s*,?\\s*(\\d{5}(?:-\\d{4})?)","i");
   const streetLike=/\b(?:p\.?o\.?\s*box|street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|highway|hwy\.?|parkway|pkwy\.?|place|pl\.?|trail|trl\.?|circle|cir\.?|square|sq\.?|loop|terrace|ter\.?|broadway|suite|ste\.?)\b/i;
   for(let i=0;i<lines.length;i++){
     const line=lines[i]; const m=line.match(locRx); if(!m)continue;
@@ -806,6 +824,20 @@ function structuredAddress(sig){
     return {street,city,state,postalCode:m[3],countryOrRegion:"United States"};
   }
   return legacy;
+}
+
+function structuredLegalCompanyEvidence(line){
+  const v=String(line||"").trim(); if(!v)return false;
+  // Legal/entity designators at the end of a line are definitive company
+  // evidence. Covers common U.S. and international forms.
+  return /(?:^|[,\s])(?:llc|l\.l\.c\.?|inc\.?|incorporated|corp\.?|corporation|pllc|lp|llp|ltd\.?|limited|plc|gmbh|ag|s\.?a\.?|sarl|s\.?a\.?r\.?l\.?|sas|b\.?v\.?|n\.?v\.?|pty\.?\s+ltd\.?|co\.?)\s*\.?$/i.test(v);
+}
+
+function structuredCompanyStrength(line,senderEmail,site){
+  if(structuredLegalCompanyEvidence(line))return 3;
+  if(structuredCompanyMatchesDomain(line,senderEmail,site))return 2;
+  if(structuredCompanyEvidence(line))return 1;
+  return 0;
 }
 
 function structuredCompanyEvidence(line){
@@ -1174,11 +1206,12 @@ function v4ResidualTitleCompany(parsed,signatureText,resolvedName,credentials){
   const candidates=atoms.filter(a=>!isIdentity(a)&&!machine(a)&&structuredPlausibleTitleText(a.text));
 
   const companies=candidates.filter(a=>
-    !(v4RecognizedNonFieldLine(a.line)&&!structuredCompanyMatchesDomain(a.line,email,site))
+    !(v4RecognizedNonFieldLine(a.line)&&!structuredCompanyMatchesDomain(a.line,email,site)&&!structuredLegalCompanyEvidence(a.text))
   ).map(a=>{
     let score=0;
-    if(structuredCompanyMatchesDomain(a.text,email,site))score+=12;
-    if(structuredCompanyEvidence(a.text))score+=6;
+    if(structuredLegalCompanyEvidence(a.text))score+=100;
+    if(structuredCompanyMatchesDomain(a.text,email,site))score+=50;
+    if(structuredCompanyEvidence(a.text))score+=10;
     if(a.text===a.text.toUpperCase()&&a.text.split(/\s+/).length>=2)score+=2;
     return{...a,score};
   }).filter(a=>a.score>0).sort((a,b)=>b.score-a.score||a.i-b.i);
@@ -1193,19 +1226,25 @@ function v4ResidualTitleCompany(parsed,signatureText,resolvedName,credentials){
     parsed.companyName="";
 
   let currentCompany=String(parsed.companyName||"");
-  let currentStrong=structuredCompanyEvidence(currentCompany)||structuredCompanyMatchesDomain(currentCompany,email,site);
+  let currentStrength=structuredCompanyStrength(currentCompany,email,site);
 
   // If the current company looks like a human role and has no organization/domain
   // evidence, discard it and let the whole-block evidence choose again.
-  if(currentCompany&&!currentStrong&&structuredPlausibleTitleText(currentCompany)){
+  if(currentCompany&&!currentStrength&&structuredPlausibleTitleText(currentCompany)){
     parsed.companyName="";
     currentCompany="";
-    currentStrong=false;
+    currentStrength=0;
   }
 
-  if(companies.length&&(!currentCompany||!currentStrong)){
-    parsed.companyName=companies[0].line.includes("|")&&structuredCompanyMatchesDomain(companies[0].line,email,site)
-      ? companies[0].line : companies[0].text;
+  if(companies.length){
+    const best=companies[0];
+    const bestStrength=structuredCompanyStrength(best.text,email,site);
+    // A legal entity suffix outranks domain inference; domain agreement outranks
+    // generic organization words such as "Solutions" or "Services".
+    if(!currentCompany||bestStrength>currentStrength){
+      parsed.companyName=best.line.includes("|")&&structuredCompanyMatchesDomain(best.line,email,site)
+        ? best.line : best.text;
+    }
   }
 
   // Some signatures use only a logo/website for the company. If no explicit
@@ -1479,9 +1518,7 @@ function v4ContactFromSignature(senderName,senderEmail,signatureText){
   const original=v4VisibleSignatureBlock(signatureText);
   const base=structuredContactFromSignature(senderName,senderEmail,original);
   v4FillPartialAddress(base,original);
-  const senderLooksHuman=looksLikePersonName(senderName||"");
-  const inferred=inferPersonName(original);
-  const resolvedName=senderLooksHuman?cleanName(senderName):(inferred||"");
+  const resolvedName=structuredResolvedName(senderName,original);
   const credentials=v4FindCredentials(norm(original).split("\n"),resolvedName);
 
   v402SelectOfficeAddress(base,original,resolvedName);
@@ -1610,9 +1647,7 @@ function structuredContactFromSignature(senderName,senderEmail,signatureText){
     .map(x=>String(x||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim())
     .filter(Boolean);
 
-  const senderLooksHuman=looksLikePersonName(senderName||"");
-  const inferred=inferPersonName(sig);
-  const resolvedName=senderLooksHuman?cleanName(senderName):(inferred||"");
+  const resolvedName=structuredResolvedName(senderName,sig);
   const email=cleanEmail(senderEmail)||cleanEmail(sig);
   const site=website(sig,email);
   const addr=structuredAddress(sig);
@@ -1650,8 +1685,9 @@ function structuredContactFromSignature(senderName,senderEmail,signatureText){
       let companyIdx=-1,best=-1;
       rest.forEach((p,i)=>{
         let score=0;
-        if(structuredCompanyMatchesDomain(p,email,site))score+=10;
-        if(structuredCompanyEvidence(p))score+=5;
+        if(structuredLegalCompanyEvidence(p))score+=100;
+        if(structuredCompanyMatchesDomain(p,email,site))score+=50;
+        if(structuredCompanyEvidence(p))score+=10;
         if(score>best){best=score;companyIdx=score>0?i:-1}
       });
       if(companyIdx>=0){
@@ -1691,8 +1727,9 @@ function structuredContactFromSignature(senderName,senderEmail,signatureText){
     const companyParts=[];
     parts.forEach((p,j)=>{
       let score=0;
-      if(structuredCompanyMatchesDomain(p,email,site))score+=10;
-      if(structuredCompanyEvidence(p))score+=5;
+      if(structuredLegalCompanyEvidence(p))score+=100;
+      if(structuredCompanyMatchesDomain(p,email,site))score+=50;
+      if(structuredCompanyEvidence(p))score+=10;
       if(score>0)companyParts.push({j,p,score});
     });
     companyParts.sort((a,b)=>b.score-a.score);
@@ -1736,8 +1773,9 @@ function structuredContactFromSignature(senderName,senderEmail,signatureText){
          structuredWebsiteLike(v)||socialNoise.test(v)||structuredLocationOnlyLine(v))continue;
       if(/\d{5}(?:-\d{4})?/.test(v)||/\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|broadway|suite|ste\.?|p\.?o\.?\s*box)\b/i.test(v))continue;
       let score=0;
-      if(structuredCompanyMatchesDomain(v,email,site))score+=10;
-      if(structuredCompanyEvidence(v))score+=5;
+      if(structuredLegalCompanyEvidence(v))score+=100;
+      if(structuredCompanyMatchesDomain(v,email,site))score+=50;
+      if(structuredCompanyEvidence(v))score+=10;
       if(v===v.toUpperCase()&&v.split(/\s+/).length>=2)score+=2;
       if(nameLine>=0&&i>nameLine&&i<=nameLine+3)score+=1;
       if(score>0)cc.push({i,v,score});
@@ -1795,8 +1833,9 @@ function structuredContactFromSignature(senderName,senderEmail,signatureText){
       const v=lines[i];
       if(!structuredPlausibleTitleText(v))continue;
       let score=0;
-      if(structuredCompanyMatchesDomain(v,email,site))score+=10;
-      if(structuredCompanyEvidence(v))score+=5;
+      if(structuredLegalCompanyEvidence(v))score+=100;
+      if(structuredCompanyMatchesDomain(v,email,site))score+=50;
+      if(structuredCompanyEvidence(v))score+=10;
       if(titleLine>=0&&i>titleLine&&i<=titleLine+2)score+=2;
       if(nameLine>=0&&i>nameLine&&i<=nameLine+3)score+=1;
       if(score>0)cc.push({i,v,score});
