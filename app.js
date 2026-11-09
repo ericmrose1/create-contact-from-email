@@ -411,7 +411,6 @@ function company(sig,name,senderEmail,site){
   return "";
 }
 const US_STATES=new Set(["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC"]);
-function usCountry(state){return US_STATES.has(String(state||"").toUpperCase())?"United States":""}
 function address(sig){
   const raw=norm(sig).replace(/[\u200B-\u200D\uFEFF]/g,"");
   const lines=raw.split("\n").map(x=>x.replace(/\s+/g," ").trim()).filter(Boolean);
@@ -508,186 +507,6 @@ function address(sig){
 function signatureScore(line){let s=0;if(cleanEmail(line))s+=3;if(phoneTokens(line).length)s+=2;if(/\b(?:www\.|https?:\/\/)/i.test(line))s+=2;if(/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line))s+=2;if(/^\d{1,6}\s+/.test(line))s+=1;const low=" "+line.toLowerCase();if(COMPANY_WORDS.some(w=>low.includes(w)))s+=2;if(TITLE_WORDS.some(w=>low.includes(w)))s+=1;if(looksLikePersonName(line))s+=1;return s}
 
 
-function identitySignatureOccurrences(text,identityName,identityEmail){
-  const lines=norm(text).split("\n").map(x=>x.trim());
-  const email=cleanEmail(identityEmail);
-  const np=nameParts(identityName||"");
-  const surname=String(np.surname||"").toLowerCase();
-  if(!email||!surname)return [];
-  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
-  const hasSurname=l=>new RegExp(`(?:^|\\s)${surname.replace(/[.*+?^${}()|[\\]\\]/g,"\\$&")}(?:$|\\s|[,|•·—–-])`,`i`).test(String(l||""));
-  const out=[];
-
-  for(let i=0;i<lines.length;i++){
-    const line=lines[i];
-    if(!line||isHeader(line)||isDisclaimer(line)||isClosingPhrase(line)||!hasSurname(line))continue;
-
-    // A genuine signature-name line must be followed shortly by this person's email
-    // and by other signature evidence. This keeps ordinary body mentions out.
-    let emailLine=-1,score=0;
-    const maxEnd=Math.min(lines.length-1,i+12);
-    for(let j=i;j<=maxEnd;j++){
-      const v=lines[j];
-      if(j>i&&(isHeader(v)||isDisclaimer(v)))break;
-      if(j>i&&hasSurname(v)&&j!==i)break;
-      if(sameEmail(cleanEmail(v),email)){emailLine=j;score+=8;break}
-      score+=signatureScore(v);
-    }
-    if(emailLine<0)continue;
-
-    let start=i;
-    // Outlook sometimes breaks "Alex Athanasopoulos" into two lines. Include a plausible
-    // one-word first-name fragment immediately above the surname/title line.
-    if(i>0){
-      const prev=lines[i-1];
-      if(prev&&!isHeader(prev)&&!isClosingPhrase(prev)&&/^[A-Za-z][A-Za-z'.-]*$/.test(prev))start=i-1;
-    }
-
-    let end=emailLine;
-    // Include a clean website-only line immediately following the email if Outlook split it.
-    for(let j=emailLine+1;j<=Math.min(lines.length-1,emailLine+2);j++){
-      const v=lines[j];
-      if(!v||isHeader(v)||isDisclaimer(v)||hasSurname(v)||cleanEmail(v))break;
-      if(/^https?:|^www\./i.test(v)){end=j;continue}
-      break;
-    }
-
-    const sig=cleanSignatureText(lines.slice(start,end+1).filter(Boolean).join("\n"));
-    const sigLines=norm(sig).split("\n").filter(Boolean);
-    if(!sig||sigLines.length<3||sigLines.length>12)continue;
-    const ph=phones(sig),ad=address(sig);
-    const evidence=(ph.businessPhone||ph.mobilePhone?2:0)+(ad.state&&ad.postalCode?2:0)+(title(sig,identityName)?2:0);
-    if(evidence<2)continue;
-    out.push({sig,start,end,emailLine,occurrence:out.length,score:100+score+evidence});
-    i=end;
-  }
-  return out;
-}
-
-function sanitizeJobTitle(value,identityName,signatureText=""){
-  let t=String(value||"").replace(/\s+/g," ").trim();
-  const fromSig=title(signatureText||"",identityName||"");
-  if(fromSig)t=String(fromSig).replace(/\s+/g," ").trim();
-  if(!t)return "";
-
-  const split=splitNameTitleLine(t);
-  if(split&&split.title)t=split.title;
-
-  const np=nameParts(identityName||"");
-  const full=cleanName(identityName||"");
-  if(full&&t.toLowerCase().startsWith(full.toLowerCase()+" "))t=t.slice(full.length).trim();
-  if(np.surname){
-    const sr=np.surname.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
-    t=t.replace(new RegExp(`^[A-Za-z][A-Za-z'.-]*\\s+${sr}\\s+`,`i`),"");
-    t=t.replace(new RegExp(`^${sr}\\s+`,`i`),"");
-  }
-  return t.replace(/^[-|•·—–\s]+|[-|•·—–\s]+$/g,"").replace(/\s+/g," ").trim();
-}
-
-function tightNotesSignature(text,identityName,identityEmail){
-  const identityOcc=identitySignatureOccurrences(text,identityName,identityEmail);
-  if(identityOcc.length)return identityOcc[0].sig;
-  const emailOcc=signatureOccurrences(text,identityEmail);
-  if(emailOcc.length)return emailOcc[0].sig;
-
-  // Last-resort safety: never save a large email/message body as Notes.
-  const cleaned=cleanSignatureText(text||"");
-  const lines=norm(cleaned).split("\n").map(x=>x.trim()).filter(Boolean);
-  if(lines.length>12||/^(from|sent|to|cc|subject):/im.test(cleaned)||/\b(?:payment options?|please see attached|please reach out|wire transfer|customer id)\b/i.test(cleaned))return "";
-  return cleaned;
-}
-
-function signatureOccurrences(segmentText,senderEmail){
-  const lines=norm(segmentText).split("\n").map(x=>x.trim());
-  const email=cleanEmail(senderEmail);
-  if(!email)return [];
-  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
-  const anchors=[];
-  for(let i=0;i<lines.length;i++)if(!isHeader(lines[i])&&sameEmail(cleanEmail(lines[i]),email))anchors.push(i);
-  const out=[];
-  for(let occurrence=0;occurrence<anchors.length;occurrence++){
-    const a=anchors[occurrence];
-    let start=-1;
-    for(let j=a-1;j>=Math.max(0,a-9);j--){
-      const v=lines[j];
-      if(isHeader(v)||isDisclaimer(v))break;
-      if(isClosingPhrase(v))continue;
-      if(signatureNameFromLine(v)){start=j;break}
-    }
-    if(start<0)continue;
-
-    let end=a;
-    // Allow a website/company line immediately after the email, but never cross into a
-    // second signature occurrence or a new message/header.
-    for(let j=a+1;j<Math.min(lines.length,a+4);j++){
-      const v=lines[j];
-      if(!v||isHeader(v)||isDisclaimer(v)||signatureNameFromLine(v)||cleanEmail(v))break;
-      if(signatureScore(v)>0||/^https?:|^www\./i.test(v)){end=j;continue}
-      break;
-    }
-    const sig=cleanSignatureText(lines.slice(start,end+1).filter(Boolean).join("\n"));
-    if(!sig)continue;
-    const score=norm(sig).split("\n").reduce((t,l)=>t+signatureScore(l),0)+12;
-    if(score<8)continue;
-    out.push({sig,score,start,end,anchor:a,occurrence});
-  }
-  return out;
-}
-
-function isolateSignature(segmentText,senderEmail){
-  const rawLines=norm(segmentText).split("\n").map(x=>x.trim());
-  const isHeader=l=>/^\s*(from|sent|to|cc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
-  const email=(senderEmail||"").toLowerCase();
-  const anchors=[];
-  for(let i=0;i<rawLines.length;i++){
-    if(email&&cleanEmail(rawLines[i])===email&&!isHeader(rawLines[i]))anchors.push(i);
-  }
-  // Strongest rule: a sender's own email inside the message body almost always sits in the signature.
-  // Build a compact block around it and stop at blank lines / quoted-message headers so email prose
-  // cannot leak into Notes or contact fields.
-  if(anchors.length){
-    let best=null;
-    for(const a of anchors){
-      let lo=a,hi=a;
-      while(lo>0 && a-lo<8){
-        const p=rawLines[lo-1];
-        if(!p||isHeader(p)||isDisclaimer(p))break;
-        lo--;
-      }
-      while(hi+1<rawLines.length && hi-a<5){
-        const n=rawLines[hi+1];
-        if(!n||isHeader(n)||isDisclaimer(n))break;
-        hi++;
-      }
-      let chunk=rawLines.slice(lo,hi+1).filter(Boolean);
-      // If there was no blank line, trim leading prose until the block becomes signature-like.
-      while(chunk.length>5 && signatureScore(chunk[0])===0 && signatureScore(chunk[1])===0)chunk.shift();
-      const score=chunk.reduce((t,l)=>t+signatureScore(l),0)+8;
-      if(!best||score>best.score)best={score,chunk};
-    }
-    if(best&&best.chunk.length)return best.chunk.join("\n");
-  }
-  // No sender-email anchor: score compact blocks, but heavily penalize prose.
-  let lines=rawLines.filter((l,i)=>l && !isDisclaimer(l));
-  if(lines.length>60)lines=lines.slice(-60);
-  let best={score:-999,chunk:[]};
-  for(let end=0;end<lines.length;end++){
-    if(isHeader(lines[end]))continue;
-    for(let len=3;len<=12;len++){
-      const start=Math.max(0,end-len+1),chunk=lines.slice(start,end+1);
-      if(chunk.some(isHeader))continue;
-      let score=chunk.reduce((t,l)=>t+signatureScore(l),0)+end/Math.max(1,lines.length);
-      score-=chunk.filter(l=>l.length>90||(/[.!?]$/.test(l)&&l.split(/\s+/).length>10)).length*5;
-      if(score>best.score)best={score,chunk};
-    }
-  }
-  if(best.score>=3)return best.chunk.join("\n");
-  return "";
-}
-
 const US_STATE_NAMES={
   alabama:"AL",alaska:"AK",arizona:"AZ",arkansas:"AR",california:"CA",colorado:"CO",connecticut:"CT",delaware:"DE",florida:"FL",georgia:"GA",hawaii:"HI",idaho:"ID",illinois:"IL",indiana:"IN",iowa:"IA",kansas:"KS",kentucky:"KY",louisiana:"LA",maine:"ME",maryland:"MD",massachusetts:"MA",michigan:"MI",minnesota:"MN",mississippi:"MS",missouri:"MO",montana:"MT",nebraska:"NE",nevada:"NV","new hampshire":"NH","new jersey":"NJ","new mexico":"NM","new york":"NY","north carolina":"NC","north dakota":"ND",ohio:"OH",oklahoma:"OK",oregon:"OR",pennsylvania:"PA","rhode island":"RI","south carolina":"SC","south dakota":"SD",tennessee:"TN",texas:"TX",utah:"UT",vermont:"VT",virginia:"VA",washington:"WA","west virginia":"WV",wisconsin:"WI",wyoming:"WY","district of columbia":"DC"
 };
@@ -724,7 +543,10 @@ function structuredPhoneObservations(sig){
     const s=String(segment||"");
     let m=s.match(/^\s*(?:[|•;,]\s*)?\(\s*(direct\s*[/&+\-]\s*text|direct text|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|[BOMCFDW])\s*\)/i);
     if(m)return tokenLabel(m[1]);
-    m=s.match(/^\s*(?:[|•;,]\s*)?(direct\s*[/&+\-]\s*text|direct text|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|[BOMCFDW])\b(?!\s*:)/i);
+    // A bare word after one number is often the prefix for the NEXT number
+    // ("Mobile 970... Office 720...").  Treat a word as a suffix only when
+    // a visible separator binds it to the preceding number ("954... | Mobile").
+    m=s.match(/^\s*[|•;,]\s*(direct\s*[/&+\-]\s*text|direct text|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|[BOMCFDW])\b(?!\s*:)/i);
     return m?tokenLabel(m[1]):"";
   };
 
@@ -908,11 +730,9 @@ function structuredPlausibleTitleText(v){
 }
 
 function structuredDiscoverSignatures(body,currentName,currentEmail,myEmail){
-  if(!body)return[];
-  let xs=allPhysicalSignatureCandidates(body,currentName||"",currentEmail||"",myEmail);
-  if(!xs.length)xs=recoverCurrentSenderSignatureCandidates(body,currentName||"",currentEmail||"",myEmail);
-  if(!xs.length)xs=recoverCurrentSenderNameCompanyCandidates(body,currentName||"",currentEmail||"",myEmail);
-  return xs;
+  // Stage 1 only: locate and freeze complete visible signature blocks.
+  // Do not parse fields here and do not use missing Outlook fields to change a boundary.
+  return captureSignatureBlocks(body,currentName||"",currentEmail||"",myEmail||"");
 }
 
 function structuredCandidateMeta(body,items,currentName,currentEmail){
@@ -1544,103 +1364,6 @@ function v4ContactFromSignature(senderName,senderEmail,signatureText){
 }
 
 
-function v4LikelyAddressContinuation(lines,index){
-  const clean=i=>String(lines[i]||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim();
-  const v=clean(index);
-  if(!v)return false;
-  if(/^[,;]+$/.test(v))return true;
-  if(/^United States(?: of America)?$/i.test(v))return true;
-
-  const stateZip=v.match(/^([A-Za-z]{2,30})\s+(\d{5}(?:-\d{4})?)$/);
-  if(stateZip&&structuredStateAbbrev(stateZip[1]))return true;
-
-  const streetLike=/\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|place|pl\.?|loop|terrace|ter\.?|highway|hwy\.?|broadway|p\.?o\.?\s*box)\b/i;
-  if(/\d/.test(v)&&streetLike.test(v))return true;
-
-  if(/\d/.test(v)&&/,\s*[A-Za-z][A-Za-z .'-]{1,60}\s*,?\s*[A-Za-z]{2,30}\s+\d{5}(?:-\d{4})?\s*$/.test(v))
-    return true;
-
-  if(/^[A-Za-z][A-Za-z .'-]{1,60}$/.test(v)){
-    let prev="",next="";
-    for(let j=index-1;j>=0;j--){
-      const x=clean(j); if(!x||/^[,;]+$/.test(x))continue; prev=x; break;
-    }
-    for(let j=index+1;j<lines.length;j++){
-      const x=clean(j); if(!x||/^[,;]+$/.test(x))continue; next=x; break;
-    }
-    const prevStreet=/\d/.test(prev)&&streetLike.test(prev);
-    const nm=next.match(/^([A-Za-z]{2,30})\s+\d{5}(?:-\d{4})?$/);
-    const nextState=!!(nm&&structuredStateAbbrev(nm[1]));
-    if(prevStreet&&nextState)return true;
-  }
-  return false;
-}
-
-function v4SignatureTailCategory(line){
-  const v=String(line||"").trim();
-  if(!v)return"";
-  if(v4RecognizedNonFieldLine(v))return"recognized";
-  if(/^https?:\/\/|^www\./i.test(v))return"website";
-  return"";
-}
-
-function v4AttachOriginalSignatureBlock(body,candidate){
-  if(!candidate?.parsed||candidate.candidateType==="referral")return candidate;
-  const lines=norm(body||"").split("\n");
-  let start=Number.isInteger(candidate.globalStart)?candidate.globalStart:-1;
-  let end=Number.isInteger(candidate.globalEnd)?candidate.globalEnd:-1;
-  if(start<0||end<start||end>=lines.length){
-    candidate.rawSignatureBlock=v4VisibleSignatureBlock(candidate.parsed.signature||candidate.text||"");
-    return candidate;
-  }
-
-  // Some email-anchored candidates begin at company/title even though the
-  // person's linked display name is visibly just above them. Recover that
-  // human-name line for the preserved original block.
-  const identityName=candidate.name||[candidate.parsed?.givenName,candidate.parsed?.middleName,candidate.parsed?.surname].filter(Boolean).join(" ");
-  const idSurname=nameParts(identityName||"").surname||"";
-  for(let j=start-1;j>=Math.max(0,start-10);j--){
-    const v=v4DisplayText(signatureDiscoveryText(String(lines[j]||""))).trim();
-    if(!v)continue;
-    if(/^\s*(?:from|sent|to|cc|bcc|subject):\s*/i.test(v)||/^[-_]{5,}$/.test(v))break;
-    const surnameHit=idSurname&&new RegExp("\\b"+idSurname.replace(/[.*+?^${}()|[\\]\\]/g,"\\$&")+"\\b","i").test(v);
-    if((identityName&&nameMatchesIdentity(v,identityName))||(surnameHit&&personNameFromLine(v))){
-      start=j;break;
-    }
-    if(isClosingPhrase(v))break;
-  }
-
-  let finalEnd=end;
-  for(let j=end+1;j<Math.min(lines.length,end+28);j++){
-    const v=String(lines[j]||"").trim();
-    if(!v)continue;
-    if(/^\s*(?:from|sent|to|cc|bcc|subject):\s*/i.test(v))break;
-
-    // A decorative divider immediately before a quoted-message header is not
-    // part of the signature. Otherwise decorative lines may be intentional
-    // signature design and can precede a website/logo footer.
-    if(/^[-_]{5,}$/.test(v)){
-      let next="";
-      for(let k=j+1;k<Math.min(lines.length,j+8);k++){
-        const x=String(lines[k]||"").trim(); if(!x)continue; next=x; break;
-      }
-      if(/^\s*(?:from|sent|to|cc|bcc|subject):\s*/i.test(next))break;
-      finalEnd=j;
-      continue;
-    }
-
-    if(v4SignatureTailCategory(v)||v4LikelyAddressContinuation(lines,j)){
-      finalEnd=j;
-      continue;
-    }
-    break;
-  }
-  const block=signatureDiscoveryText(lines.slice(start,finalEnd+1).join("\n")).replace(/^\s*\n+|\n+\s*$/g,"");
-  candidate.rawSignatureBlock=block||v4VisibleSignatureBlock(candidate.parsed.signature||candidate.text||"");
-  return candidate;
-}
-
-
 function structuredContactFromSignature(senderName,senderEmail,signatureText){
   const sig=cleanSignatureText(signatureText);
   const lines=norm(sig).split("\n")
@@ -1877,9 +1600,6 @@ function parseContactFromSignature(senderName,senderEmail,signatureText){
   );
 }
 
-function parseContact(senderName,senderEmail,segmentText){
-  return parseContactFromSignature(senderName,senderEmail,isolateSignature(segmentText,senderEmail));
-}
 function sameEmail(a,b){return cleanEmail(a)&&cleanEmail(a)===cleanEmail(b)}
 function cleanSignatureText(sig){
   const cleanLine=line=>{
@@ -1898,264 +1618,6 @@ function cleanSignatureText(sig){
   while(lines.length&&isClosingPhrase(lines[0]))lines.shift();
   return lines.join("\n");
 }
-function splitMessage(body,currentName,currentEmail){
-  const text=norm(body),lines=text.split("\n"),headers=[];
-  for(let i=0;i<lines.length;i++){
-    const m=lines[i].match(/^\s*From:\s*(.+)$/i);
-    if(!m)continue;
-    const id=headerIdentity(m[1]);
-    if(id.email)headers.push({i,name:id.name,email:id.email});
-  }
-
-  const firstHeader=headers.length?headers[0].i:lines.length;
-  const out=[{name:cleanName(currentName||"Current sender"),email:cleanEmail(currentEmail),text:lines.slice(0,firstHeader).join("\n"),headerAuthoritative:true}];
-
-  for(let h=0;h<headers.length;h++){
-    const a=headers[h],b=headers[h+1]?headers[h+1].i:lines.length;
-    out.push({name:a.name,email:a.email,text:lines.slice(a.i+1,b).join("\n"),headerAuthoritative:true});
-  }
-
-  const bestByKey=new Map();
-  for(const seg of out){
-    const key=seg.email||String(seg.name||"").toLowerCase();
-    if(!key)continue;
-    const sig=isolateSignature(seg.text,seg.email);
-    let score=norm(sig).split("\n").reduce((t,l)=>t+signatureScore(l),0);
-    if(seg.email&&norm(sig).toLowerCase().includes(seg.email.toLowerCase()))score+=6;
-    if(seg.headerAuthoritative&&seg.name&&looksLikePersonName(seg.name))score+=30;
-    const prev=bestByKey.get(key);
-    if(!prev||score>prev.score)bestByKey.set(key,{score,seg});
-  }
-  return [...bestByKey.values()].map(x=>x.seg);
-}
-
-
-function plainTextOccurrenceCandidates(body,currentName,currentEmail,myEmail){
-  const lines=norm(body).split("\n").map(x=>x.trim());
-  const identities=[];
-  const seenIdentity=new Set();
-
-  for(const line of lines){
-    const m=line.match(/^\s*From:\s*(.+)$/i);
-    if(!m)continue;
-    const id=headerIdentity(m[1]);
-    const key=cleanEmail(id.email);
-    if(key&&!sameEmail(key,myEmail)&&looksLikePersonName(id.name||"")&&!seenIdentity.has(key)){
-      seenIdentity.add(key);identities.push({name:id.name,email:key,authoritative:true});
-    }
-  }
-
-  const ce=cleanEmail(currentEmail);
-  if(ce&&!sameEmail(ce,myEmail)&&looksLikePersonName(currentName||"")&&!seenIdentity.has(ce)){
-    seenIdentity.add(ce);identities.push({name:cleanName(currentName),email:ce,authoritative:true});
-  }
-
-  const out=[];
-  const identityEmails=new Set();
-  for(const id of identities){
-    const occs=identitySignatureOccurrences(body,id.name,id.email);
-    if(!occs.length)continue;
-    identityEmails.add(id.email);
-    for(const o of occs){
-      const parsed=parseContactFromSignature(id.name,id.email,o.sig);
-      const np=nameParts(id.name);
-      parsed.givenName=np.givenName;parsed.middleName=np.middleName;parsed.surname=np.surname;
-      parsed.email=id.email;
-      parsed.jobTitle=sanitizeJobTitle(parsed.jobTitle,id.name,o.sig);
-      parsed.signature=o.sig;
-      parsed.personalNotes=o.sig;
-      parsed._debug={source:"Bounded signature occurrence + forwarded From identity",headerAuthoritative:true,headerName:id.name,occurrence:o.occurrence,textSignature:o.sig,htmlSignature:""};
-      out.push({score:o.score,name:id.name,email:id.email,text:o.sig,parsed,headerAuthoritative:true,occurrenceKey:`identity:${id.email}:${o.start}:${o.end}`,occurrence:o.occurrence});
-    }
-  }
-
-  // Generic fallback for people whose forwarded From header is unavailable. Keep occurrences
-  // separate rather than collapsing identical email addresses.
-  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
-  let occurrence=0;
-  for(let i=0;i<lines.length;i++){
-    if(isHeader(lines[i]))continue;
-    const email=cleanEmail(lines[i]);
-    if(!email||sameEmail(email,myEmail)||identityEmails.has(email))continue;
-    let start=-1;
-    for(let j=i-1;j>=Math.max(0,i-10);j--){
-      const v=lines[j];
-      if(isHeader(v)||isDisclaimer(v))break;
-      if(!v||isClosingPhrase(v))continue;
-      if(signatureNameFromLine(v)){start=j;break}
-    }
-    if(start<0)continue;
-    let end=i;
-    const sig=cleanSignatureText(lines.slice(start,end+1).filter(Boolean).join("\n"));
-    if(!sig)continue;
-    const name=signatureNameFromLine(lines[start])||inferPersonName(sig);
-    if(!name||!looksLikePersonName(name))continue;
-    const parsed=parseContactFromSignature(name,email,sig);
-    parsed.jobTitle=sanitizeJobTitle(parsed.jobTitle,name,sig);
-    parsed.signature=sig;parsed.personalNotes=sig;
-    out.push({score:50,name,email,text:sig,parsed,headerAuthoritative:false,occurrenceKey:`generic:${i}:${occurrence}`,occurrence});
-    occurrence++;
-  }
-  return out;
-}
-
-function headerSignatureCandidates(body,currentName,currentEmail,myEmail){
-  const out=[];
-  let segmentIndex=0;
-  for(const seg of splitMessage(body,currentName,currentEmail)){
-    if(!seg.email||sameEmail(seg.email,myEmail)||!looksLikePersonName(seg.name||"")){segmentIndex++;continue}
-    let occs=signatureOccurrences(seg.text,seg.email);
-    if(!occs.length){
-      const fallback=cleanSignatureText(isolateSignature(seg.text,seg.email));
-      if(fallback)occs=[{sig:fallback,score:norm(fallback).split("\n").reduce((t,l)=>t+signatureScore(l),0),occurrence:0}];
-    }
-    for(const o of occs){
-      const sig=cleanSignatureText(o.sig);
-      if(!sig)continue;
-      const parsed=parseContactFromSignature(seg.name,seg.email,sig);
-      const np=nameParts(seg.name);
-      parsed.givenName=np.givenName;
-      parsed.middleName=np.middleName;
-      parsed.surname=np.surname;
-      parsed.email=seg.email;
-      parsed.signature=sig;
-      parsed.personalNotes=sig;
-      parsed._debug={
-        source:"Forwarded From header authoritative — signature occurrence "+(o.occurrence+1),
-        headerAuthoritative:true,
-        headerName:seg.name,
-        occurrence:o.occurrence,
-        htmlSignature:"",
-        textSignature:sig
-      };
-      out.push({
-        score:100+(o.score||0),name:seg.name,email:seg.email,text:sig,parsed,
-        headerAuthoritative:true,occurrenceKey:`header:${segmentIndex}:${o.occurrence}`,
-        occurrence:o.occurrence
-      });
-    }
-    segmentIndex++;
-  }
-  return out;
-}
-
-
-function inferAnchoredName(sig,email){
-  const lines=norm(sig).split("\n").map(x=>x.trim()).filter(Boolean);
-  const emailIdx=lines.findIndex(l=>cleanEmail(l)===cleanEmail(email));
-  const stop=emailIdx>=0?emailIdx:lines.length;
-  for(let i=stop-1;i>=Math.max(0,stop-8);i--){const found=personNameFromLine(lines[i]);if(found)return found}
-  return inferPersonName(sig);
-}
-
-function currentSenderSignatureFromBody(body,currentName){
-  const lines=norm(body).split("\n").map(x=>x.trim());
-  const wanted=String(currentName||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
-  if(!wanted)return "";
-  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
-  const normKey=v=>String(v||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
-  const hits=[];
-  for(let i=0;i<lines.length;i++){
-    const key=normKey(lines[i]);
-    // Accept "Linda Shin | Associate", "Linda Shin - Architect", etc.
-    if(key===wanted || key.startsWith(wanted+" "))hits.push(i);
-  }
-  let best=null;
-  for(const start of hits){
-    const kept=[];
-    let blankRun=0;
-    for(let j=start;j<lines.length && kept.length<18;j++){
-      const v=lines[j];
-      if(j>start && (isHeader(v)||isDisclaimer(v)))break;
-      if(!v){
-        blankRun++;
-        if(blankRun>=2 && kept.length>=4)break;
-        continue;
-      }
-      blankRun=0;
-      kept.push(v);
-      // Once we have a substantial signature, stop before obvious prose that follows it.
-      if(kept.length>=6 && v.length>120 && /[.!?]$/.test(v))break;
-    }
-    const sig=cleanSignatureText(kept.join("\n"));
-    const parsed=parseContactFromSignature(currentName,"",sig);
-    const evidence=[
-      !!(parsed.companyName),
-      !!(parsed.businessPhone||parsed.mobilePhone),
-      !!(parsed.state&&parsed.postalCode),
-      !!parsed.businessHomePage,
-      !!parsed.jobTitle
-    ].filter(Boolean).length;
-    const score=signatureScore(lines[start]||"")+evidence*3+norm(sig).split("\n").filter(Boolean).length/10;
-    if(sig && (!best||score>best.score))best={score,sig};
-  }
-  return best?best.sig:"";
-}
-
-function anchoredSignatureCandidates(body,currentName,currentEmail,myEmail){
-  const lines=norm(body).split("\n").map(x=>x.trim());
-  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
-
-  const authoritative=headerSignatureCandidates(body,currentName,currentEmail,myEmail);
-  const authoritativeEmails=new Set(authoritative.map(x=>cleanEmail(x.email)).filter(Boolean));
-  const byEmail=new Map();
-
-  // Current Outlook sender (non-user) when there is no forwarded-header candidate for it.
-  if(currentEmail&&!sameEmail(currentEmail,myEmail)&&!authoritativeEmails.has(cleanEmail(currentEmail))&&looksLikePersonName(currentName||"")){
-    const directSig=currentSenderSignatureFromBody(body,currentName);
-    if(directSig){
-      const parsed=parseContactFromSignature(currentName,currentEmail,directSig);
-      const np=nameParts(currentName);
-      parsed.givenName=np.givenName;parsed.middleName=np.middleName;parsed.surname=np.surname;
-      parsed.email=cleanEmail(currentEmail);
-      parsed.signature=cleanSignatureText(directSig);parsed.personalNotes=parsed.signature;
-      parsed._debug={source:"Current sender — Outlook From header + visible name anchor",htmlSignature:"",textSignature:parsed.signature};
-      const directScore=norm(parsed.signature).split("\n").reduce((t,l)=>t+signatureScore(l),0)+10;
-      byEmail.set(cleanEmail(currentEmail),{score:directScore,name:currentName,email:cleanEmail(currentEmail),text:parsed.signature,parsed});
-    }
-  }
-
-  // Generic visible-email discovery for messages without an authoritative forwarded From header.
-  for(let i=0;i<lines.length;i++){
-    if(isHeader(lines[i]))continue;
-    const email=cleanEmail(lines[i]);
-    if(!email||sameEmail(email,myEmail)||authoritativeEmails.has(email))continue;
-
-    const occs=signatureOccurrences(lines.join("\n"),email).filter(o=>o.anchor===i);
-    let sig="";
-    if(occs.length)sig=occs[0].sig;
-    if(!sig){
-      let lo=i,hi=i,blankBudget=1;
-      for(let j=i-1;j>=0&&i-j<=10;j--){const v=lines[j];if(isHeader(v)||isDisclaimer(v))break;if(!v){if(blankBudget--<=0)break;continue}lo=j}
-      blankBudget=1;
-      for(let j=i+1;j<lines.length&&j-i<=8;j++){const v=lines[j];if(isHeader(v)||isDisclaimer(v))break;if(!v){if(blankBudget--<=0)break;continue}hi=j}
-      let chunk=lines.slice(lo,hi+1).filter(Boolean);
-      let emailLocal=chunk.findIndex(l=>cleanEmail(l)===email);if(emailLocal<0)emailLocal=chunk.length-1;
-      let nameLocal=-1;
-      for(let j=emailLocal-1;j>=Math.max(0,emailLocal-8);j--){if(!isClosingPhrase(chunk[j])&&signatureNameFromLine(chunk[j])){nameLocal=j;break}}
-      if(nameLocal>=0)chunk=chunk.slice(nameLocal);else while(chunk.length>5&&signatureScore(chunk[0])===0)chunk.shift();
-      sig=cleanSignatureText(chunk.join("\n"));
-    }
-    const score=norm(sig).split("\n").reduce((t,l)=>t+signatureScore(l),0);
-    if(score<5)continue;
-    const inferred=inferAnchoredName(sig,email);
-    const name=(sameEmail(email,currentEmail)&&looksLikePersonName(currentName||""))?currentName:(inferred||email.split("@")[0]);
-    const parsed=parseContactFromSignature(name,email,sig);
-    parsed.signature=sig;parsed.personalNotes=sig;
-    const existing=byEmail.get(email);
-    if(!existing||score>existing.score)byEmail.set(email,{score,name,email,text:sig,parsed});
-  }
-
-  return [...authoritative,...byEmail.values()].map(x=>({
-    name:x.name,email:x.email,text:x.text,parsed:x.parsed,
-    headerAuthoritative:!!x.headerAuthoritative,occurrenceKey:x.occurrenceKey||"",occurrence:x.occurrence
-  }));
-}
-
-
 function allMessageSegments(body,currentName,currentEmail){
   const lines=norm(body).split("\n");
   const headers=[];
@@ -2174,169 +1636,186 @@ function allMessageSegments(body,currentName,currentEmail){
   }
   return segments;
 }
-function signatureEvidenceScore(lines){
-  const text=lines.join("\n");let score=0;
-  if(cleanEmail(text))score+=4;
-  if(/\b(?:office|direct|mobile|cell|fax|tel|phone)\b/i.test(text)||/\d{3}[\s.\-]\d{3}[\s.\-]\d{4}/.test(text))score+=3;
-  if(/\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(text))score+=3;
-  if(/\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|loop|suite|ste\.?)\b/i.test(text))score+=2;
-  if(/https?:\/\/|www\./i.test(text))score+=2;
-  if(TITLE_WORDS.some(t=>text.toLowerCase().includes(t)))score+=2;
-  if(COMPANY_WORDS.some(w=>(" "+text.toLowerCase()).includes(w)))score+=1;
-  return score;
+
+// -----------------------------------------------------------------------------
+// Stage 1: immutable signature capture
+// -----------------------------------------------------------------------------
+// A captured block is the source of truth for both Notes and all downstream
+// parsing.  Field detection is deliberately forbidden from changing the block.
+function signatureCaptureLine(v){
+  const out=v4DisplayText(signatureDiscoveryText(String(v||"")))
+    .replace(/[\u00ad\u200b-\u200d\ufeff]/g,"")
+    .replace(/\u00a0/g," ")
+    .replace(/[ \t]+$/g,"");
+  // Outlook plain text can expose inline-logo attachment placeholders that are
+  // not visible signature text.  Do not copy those transport artifacts to Notes.
+  if(/^\s*<image\d+\.(?:png|jpe?g|gif|bmp|webp)>\s*$/i.test(out))return "";
+  return out;
 }
+function signatureHardBoundary(line){
+  const v=String(line||"").trim();
+  if(!v)return false;
+  if(/^\s*(?:from|sent|to|cc|bcc|subject):\s*/i.test(v))return true;
+  if(/^(?:confidentiality notice|confidential notice|legal notice|disclaimer)\b/i.test(v))return true;
+  if(/\b(?:this communication|this e-?mail).{0,45}\bconfidential\b/i.test(v))return true;
+  return false;
+}
+function visibleNameAtLine(line,identityName=""){
+  const direct=cleanName(signatureNameFromLine(line)||personNameFromLine(line)||"");
+  if(direct&&(!identityName||nameMatchesIdentity(line,identityName)))return direct;
+  return "";
+}
+function signatureAnchorEvidence(lines,start,identityEmail){
+  const probe=[];
+  let nonblank=0;
+  for(let j=start;j<lines.length&&j<start+24&&nonblank<12;j++){
+    const v=signatureCaptureLine(lines[j]);
+    if(signatureHardBoundary(v)&&j>start)break;
+    if(!v.trim())continue;
+    probe.push(v.trim());nonblank++;
+  }
+  const t=probe.join("\n");
+  if(identityEmail&&sameEmail(cleanEmail(t),identityEmail))return true;
+  if(phoneTokens(t).length)return true;
+  if(/\b[A-Z]{2}\s*,?\s*\d{5}(?:-\d{4})?\b/i.test(t))return true;
+  if(/\b(?:inc\.?|incorporated|llc|l\.l\.c\.?|corp\.?|corporation|ltd\.?|limited|llp|pllc|gmbh|s\.a\.?|s\.r\.l\.?|p\.c\.?)\b/i.test(t))return true;
+  if(/https?:\/\/|www\.|@[a-z0-9.-]+\.[a-z]{2,}/i.test(t))return true;
+  if(TITLE_WORDS.some(x=>t.toLowerCase().includes(x)))return true;
+  return false;
+}
+function captureSignatureFromStart(lines,start,identityName,identityEmail){
+  if(start<0||start>=lines.length)return null;
+  let end=start;
+  let blankRun=0,nonblank=0;
+  for(let j=start;j<lines.length&&j<start+60&&nonblank<32;j++){
+    const raw=signatureCaptureLine(lines[j]);
+    const v=raw.trim();
+    if(j>start&&signatureHardBoundary(v))break;
+    if(j>start&&v&&nameMatchesIdentity(v,identityName))break;
+    if(!v){
+      blankRun++;
+      // Outlook often inserts a blank line between every signature row.  Only a
+      // long visual gap is considered a boundary, and only after content exists.
+      if(blankRun>=3&&nonblank>=2)break;
+      end=j;
+      continue;
+    }
+    blankRun=0;
+    // A long prose paragraph after signature evidence is not signature material.
+    if(j>start&&nonblank>=2&&v.length>180&&/[.!?]$/.test(v)&&!cleanEmail(v)&&!phoneTokens(v).length)break;
+    end=j;nonblank++;
+  }
+  if(!signatureAnchorEvidence(lines,start,identityEmail))return null;
+  const block=v4VisibleSignatureBlock(lines.slice(start,end+1).map(signatureCaptureLine).join("\n"));
+  if(!block)return null;
+  return {start,end,block};
+}
+function captureSegmentSignatureBlocks(segment,myEmail){
+  const identityEmail=cleanEmail(segment.email||"");
+  const identityName=cleanName(segment.name||"");
+  if(identityEmail&&sameEmail(identityEmail,myEmail))return [];
+  const lines=norm(segment.text||"").split("\n");
+  const starts=[];
+
+  // Best anchor: the person's visibly written name.  This outranks directory
+  // metadata and preserves the order the signer actually used.
+  if(identityName){
+    for(let i=0;i<lines.length;i++)if(nameMatchesIdentity(signatureCaptureLine(lines[i]),identityName))starts.push(i);
+  }
+
+  // Fallback: a visible signature email with a nearby human name above it.
+  if(!starts.length&&identityEmail){
+    for(let i=0;i<lines.length;i++){
+      if(!sameEmail(cleanEmail(signatureCaptureLine(lines[i])),identityEmail))continue;
+      for(let j=i-1;j>=Math.max(0,i-18);j--){
+        const v=signatureCaptureLine(lines[j]).trim();
+        if(signatureHardBoundary(v))break;
+        if(!v||isClosingPhrase(v))continue;
+        const n=cleanName(signatureNameFromLine(v)||personNameFromLine(v)||"");
+        if(n){starts.push(j);break}
+      }
+    }
+  }
+
+  const out=[],used=[];
+  for(const start of [...new Set(starts)].sort((a,b)=>a-b)){
+    if(used.some(r=>start>=r.start&&start<=r.end))continue;
+    const cap=captureSignatureFromStart(lines,start,identityName,identityEmail);
+    if(!cap)continue;
+    const visibleName=visibleNameAtLine(lines[start],identityName)||inferPersonName(cap.block)||identityName;
+    const email=identityEmail||cleanEmail(cap.block);
+    const parsed=v4ContactFromSignature(visibleName,email,cap.block);
+    // Freeze Stage 1 output.  No parser may rewrite Notes or the source block.
+    parsed.signature=cap.block;
+    parsed.personalNotes=cap.block;
+    parsed._debug={...(parsed._debug||{}),source:"Stage 1 immutable signature capture",capturedStart:cap.start,capturedEnd:cap.end};
+    out.push({
+      score:100,name:visibleName||identityName,email,text:cap.block,rawSignatureBlock:cap.block,
+      parsed,candidateType:"signature",physicalOccurrence:true,
+      occurrenceKey:`capture:${segment.start}:${cap.start}:${cap.end}`,
+      globalStart:segment.start+cap.start,globalEnd:segment.start+cap.end
+    });
+    used.push({start:cap.start,end:cap.end});
+  }
+  return out;
+}
+function captureGenericSignatureBlocks(body,myEmail,claimed){
+  const lines=norm(body||"").split("\n"),out=[];
+  const ranges=claimed||[];
+  const overlaps=(a,b)=>ranges.some(r=>!(b<r.start||a>r.end));
+  for(let i=0;i<lines.length;i++){
+    const current=signatureCaptureLine(lines[i]);
+    if(signatureHardBoundary(current))continue;
+    const email=cleanEmail(current);
+    if(!email||sameEmail(email,myEmail))continue;
+    let start=-1,name="";
+    for(let j=i-1;j>=Math.max(0,i-18);j--){
+      const v=signatureCaptureLine(lines[j]).trim();
+      if(signatureHardBoundary(v))break;
+      if(!v||isClosingPhrase(v))continue;
+      const n=cleanName(signatureNameFromLine(v)||personNameFromLine(v)||"");
+      if(n){start=j;name=n;break}
+    }
+    if(start<0)continue;
+    const cap=captureSignatureFromStart(lines,start,name,email);
+    if(!cap||overlaps(cap.start,cap.end))continue;
+    const parsed=v4ContactFromSignature(name,email,cap.block);
+    parsed.signature=cap.block;parsed.personalNotes=cap.block;
+    parsed._debug={...(parsed._debug||{}),source:"Stage 1 generic immutable signature capture",capturedStart:cap.start,capturedEnd:cap.end};
+    out.push({score:70,name,email,text:cap.block,rawSignatureBlock:cap.block,parsed,candidateType:"signature",physicalOccurrence:true,occurrenceKey:`generic-capture:${cap.start}:${cap.end}`,globalStart:cap.start,globalEnd:cap.end});
+    ranges.push({start:cap.start,end:cap.end});
+  }
+  return out;
+}
+function captureSignatureBlocks(body,currentName,currentEmail,myEmail){
+  const segments=allMessageSegments(body,currentName,currentEmail),out=[],ranges=[];
+  for(const seg of segments){
+    for(const c of captureSegmentSignatureBlocks(seg,myEmail)){
+      out.push(c);ranges.push({start:c.globalStart,end:c.globalEnd});
+    }
+  }
+  out.push(...captureGenericSignatureBlocks(body,myEmail,ranges));
+  out.sort((a,b)=>(a.globalStart??0)-(b.globalStart??0));
+  return out;
+}
+
 function nameMatchesIdentity(line,identityName){
   const raw=cleanName(signatureNameFromLine(line)||personNameFromLine(line)||"");
   const wanted=cleanName(identityName||"");
   if(!raw||!wanted)return false;
-  const key=v=>String(v||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
-  const a=key(raw),b=key(wanted);if(a===b)return true;
-  const ap=a.split(/\s+/).filter(Boolean),bp=b.split(/\s+/).filter(Boolean);
-  return ap.length>=2&&bp.length>=2&&ap[ap.length-1]===bp[bp.length-1];
-}
+  const tokens=v=>String(v||"").toLowerCase().match(/[a-z0-9]+/g)||[];
+  const a=tokens(raw),b=tokens(wanted);
+  if(a.join(" ")===b.join(" "))return true;
 
-function authoritativeSignatureStart(lines,j,identityName){
-  const parts=nameParts(identityName||"");
-  const surname=String(parts.surname||"").toLowerCase();
-  const line=String(lines[j]||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim();
-  if(!line)return -1;
-
-  const split=splitNameTitleLine(line);
-  if(split&&split.name){
-    const sp=nameParts(split.name);
-    if(!surname||String(sp.surname||"").toLowerCase()===surname)return j;
-  }
-  if(looksLikePersonName(line)){
-    const p=nameParts(line);
-    if(!surname||String(p.surname||"").toLowerCase()===surname)return j;
-  }
-
-  if(surname){
-    const next=String(lines[j+1]||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim();
-    if(/^[A-Za-z][A-Za-z'.-]*$/.test(line)&&next.toLowerCase().startsWith(surname+" ")){
-      const rem=next.slice(parts.surname.length).trim();
-      if(TITLE_WORDS.some(t=>rem.toLowerCase().includes(t))||rem.endsWith("&"))return j;
-    }
-    const low=line.toLowerCase();
-    if(low.startsWith(surname+" ")){
-      const rem=line.slice(parts.surname.length).trim();
-      if(TITLE_WORDS.some(t=>rem.toLowerCase().includes(t))||rem.endsWith("&")){
-        const prev=String(lines[j-1]||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim();
-        if(/^[A-Za-z][A-Za-z'.-]*$/.test(prev))return j-1;
-        return j;
-      }
-    }
-  }
-  return -1;
-}
-
-function boundedSignatureAtEmail(lines,emailIndex,identityName,identityEmail){
-  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
-  let start=-1;
-  for(let j=emailIndex-1;j>=Math.max(0,emailIndex-12);j--){
-    const v=String(lines[j]||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim();
-    if(isHeader(v)||isDisclaimer(v))break;
-    if(!v)continue;
-    const a=authoritativeSignatureStart(lines,j,identityName);
-    if(a>=0){start=a;break}
-    if(isClosingPhrase(v))break;
-    const generic=signatureNameFromLine(v);
-    if(generic){start=j;break}
-  }
-  if(start<0)return null;
-  let end=emailIndex;
-  for(let j=emailIndex+1;j<Math.min(lines.length,emailIndex+5);j++){
-    const v=String(lines[j]||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim();
-    if(!v||isHeader(v)||isDisclaimer(v)||isClosingPhrase(v))break;
-    if(cleanEmail(v)&&!sameEmail(cleanEmail(v),identityEmail))break;
-    if(authoritativeSignatureStart(lines,j,identityName)>=0||signatureNameFromLine(v))break;
-    if(/^https?:|^www\./i.test(v)||signatureScore(v)>0){end=j;continue}
-    break;
-  }
-  const raw=lines.slice(start,end+1).map(x=>String(x||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim()).filter(Boolean);
-  const sig=cleanSignatureText(raw.join("\n"));
-  if(!sig||signatureEvidenceScore(raw)<5)return null;
-  return {start,end,sig};
-}
-function boundedSignatureAtName(lines,nameIndex,identityName,identityEmail){
-  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  const isDisclaimer=l=>/confidential|privileged|intended recipient|virus|disclaimer|please consider the environment/i.test(l);
-  const raw=[];
-  let lastIncluded=nameIndex-1;
-  let blankRun=0;
-
-  // Outlook often inserts blank lines between every visual line of a signature.
-  // Blank lines therefore are not, by themselves, a signature boundary.
-  for(let j=nameIndex;j<Math.min(lines.length,nameIndex+22);j++){
-    const v=String(lines[j]||"")
-      .replace(/[\u00ad\u200b-\u200d\ufeff]/g,"")
-      .trim();
-
-    if(j>nameIndex&&(isHeader(v)||isDisclaimer(v)))break;
-
-    if(!v){
-      blankRun++;
-      // Three consecutive blank lines after a substantial block are a safe stop.
-      if(blankRun>=3&&raw.length>=4)break;
-      continue;
-    }
-    blankRun=0;
-
-    if(j>nameIndex&&isClosingPhrase(v))break;
-    if(j>nameIndex&&nameMatchesIdentity(v,identityName))break;
-
-    // A horizontal divider ends the physical signature block.
-    if(/^[-_]{5,}$/.test(v))break;
-
-    raw.push(v);
-    lastIncluded=j;
-  }
-
-  const sig=cleanSignatureText(raw.join("\n"));
-  if(!sig||signatureEvidenceScore(raw)<5)return null;
-  return {start:nameIndex,end:lastIncluded,sig};
-}
-function signatureOccurrencesInSegment(segment,myEmail){
-  const identityEmail=cleanEmail(segment.email),identityName=cleanName(segment.name||"");
-  if(identityEmail&&sameEmail(identityEmail,myEmail))return [];
-  const lines=norm(segment.text||"").split("\n"),out=[],used=[];
-  const overlaps=(a,b)=>used.some(r=>!(b<r.start||a>r.end));
-  const add=(block,source)=>{
-    if(!block||overlaps(block.start,block.end))return;
-    const parsed=parseContactFromSignature(identityName,identityEmail,block.sig);
-    if(identityName&&looksLikePersonName(identityName)){const np=nameParts(identityName);parsed.givenName=np.givenName;parsed.middleName=np.middleName;parsed.surname=np.surname}
-    parsed.email=identityEmail||cleanEmail(parsed.email);parsed.jobTitle=sanitizeJobTitle(parsed.jobTitle,identityName||[parsed.givenName,parsed.surname].filter(Boolean).join(" "),block.sig);parsed.signature=block.sig;parsed.personalNotes=block.sig;parsed._debug={source,physicalOccurrence:true};
-    used.push({start:block.start,end:block.end});
-    out.push({score:100,name:identityName||inferPersonName(block.sig),email:identityEmail||cleanEmail(parsed.email),text:block.sig,parsed,physicalOccurrence:true,occurrenceKey:`segment:${segment.start}:${block.start}:${block.end}`,localStart:block.start,localEnd:block.end});
-  };
-  if(identityEmail){for(let i=0;i<lines.length;i++)if(sameEmail(cleanEmail(lines[i]),identityEmail))add(boundedSignatureAtEmail(lines,i,identityName,identityEmail),"Physical signature occurrence — email anchor")}
-  if(identityName){for(let i=0;i<lines.length;i++)if(nameMatchesIdentity(lines[i],identityName))add(boundedSignatureAtName(lines,i,identityName,identityEmail),"Physical signature occurrence — name anchor")}
-  return out;
-}
-function genericPhysicalSignatureOccurrences(body,myEmail,claimedGlobalRanges){
-  const lines=norm(body).split("\n");const out=[];const claimed=claimedGlobalRanges||[];
-  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  const isClaimed=(a,b)=>claimed.some(r=>!(b<r.start||a>r.end));
-  for(let i=0;i<lines.length;i++){
-    if(isHeader(lines[i]))continue;const email=cleanEmail(lines[i]);if(!email||sameEmail(email,myEmail))continue;
-    let name="",start=-1;for(let j=i-1;j>=Math.max(0,i-12);j--){if(isHeader(lines[j]))break;const n=signatureNameFromLine(lines[j])||personNameFromLine(lines[j]);if(n&&!isClosingPhrase(lines[j])){name=n;start=j;break}}
-    if(start<0)continue;const block=boundedSignatureAtEmail(lines,i,name,email);if(!block||isClaimed(block.start,block.end))continue;
-    const parsed=parseContactFromSignature(name,email,block.sig);parsed.signature=block.sig;parsed.personalNotes=block.sig;parsed.jobTitle=sanitizeJobTitle(parsed.jobTitle,name,block.sig);
-    out.push({score:60,name,email,text:block.sig,parsed,physicalOccurrence:true,occurrenceKey:`generic:${block.start}:${block.end}`,globalStart:block.start,globalEnd:block.end});claimed.push({start:block.start,end:block.end});
-  }
-  return out;
-}
-function allPhysicalSignatureCandidates(body,currentName,currentEmail,myEmail){
-  const segments=allMessageSegments(body,currentName,currentEmail),out=[],ranges=[];
-  for(const seg of segments){
-    for(const c of signatureOccurrencesInSegment(seg,myEmail)){
-      c.globalStart=seg.start+(c.localStart||0);c.globalEnd=seg.start+(c.localEnd||0);ranges.push({start:c.globalStart,end:c.globalEnd});out.push(c);
-    }
-  }
-  out.push(...genericPhysicalSignatureOccurrences(body,myEmail,ranges));
-  out.sort((a,b)=>(a.globalStart??0)-(b.globalStart??0));
-  return out;
+  // Outlook/Exchange frequently exposes directory names as "Last First".
+  // Name order is therefore not authoritative metadata.  Match the same visible
+  // name tokens regardless of order, while tolerating a middle initial on one side.
+  const significant=x=>x.filter(t=>t.length>1);
+  const as=significant(a),bs=significant(b);
+  const aset=new Set(as),bset=new Set(bs);
+  if(as.length>=2&&bs.length>=2&&as.every(t=>bset.has(t))&&bs.every(t=>aset.has(t)))return true;
+  if(as.length>=2&&bs.length>=2&&(as.every(t=>bset.has(t))||bs.every(t=>aset.has(t))))return true;
+  return false;
 }
 
 function referralLineText(v){
@@ -2504,182 +1983,6 @@ function htmlBodyToText(htmlText){
     const doc=new DOMParser().parseFromString(htmlText||"","text/html");
     return visibleSignatureTextFromNode(doc.body);
   }catch(_){return ""}
-}
-function signatureContainerScore(text,email){
-  const t=norm(text);
-  if(!t||!sameEmail(cleanEmail(t),email) && !t.toLowerCase().includes(String(email||"").toLowerCase()))return -999;
-  const lines=t.split("\n").map(x=>x.trim()).filter(Boolean);
-  let score=lines.reduce((sum,l)=>sum+signatureScore(l),0);
-  if(address(t).state)score+=4;
-  const ph=phones(t);if(ph.businessPhone||ph.mobilePhone)score+=4;
-  if(inferPersonName(t))score+=2;
-  if(lines.length>=4&&lines.length<=18)score+=3;
-  if(lines.length>30)score-=10;
-  if(/^(from|sent|to|cc|subject):/im.test(t))score-=12;
-  return score;
-}
-function findBestHtmlSignatureContainer(anchor,email){
-  // Prefer a complete signature table. Most Outlook signatures are HTML tables and the
-  // mailto link may live several nested cells below the name/address/phones.
-  const tables=[];
-  let t=anchor.closest?anchor.closest("table"):null;
-  let hops=0;
-  while(t&&hops<4){
-    const text=visibleSignatureTextFromNode(t);
-    const lines=norm(text).split("\n").map(x=>x.trim()).filter(Boolean);
-    const score=signatureContainerScore(text,email);
-    if(score>-999 && lines.length>=3 && lines.length<=30)tables.push({node:t,text,score:score+8});
-    t=t.parentElement?t.parentElement.closest("table"):null;
-    hops++;
-  }
-  if(tables.length){
-    tables.sort((a,b)=>b.score-a.score || b.text.length-a.text.length);
-    return tables[0];
-  }
-
-  // Fallback for signatures built from DIV/SPAN blocks instead of tables. Prefer the
-  // broadest compact ancestor that still looks signature-like, rather than the smallest
-  // ancestor containing only the email link.
-  let node=anchor,best=null;
-  for(let depth=0;node&&depth<10;depth++,node=node.parentElement){
-    if(!node||!node.textContent)continue;
-    const tag=(node.tagName||"").toLowerCase();
-    if(["body","html"].includes(tag))break;
-    const text=visibleSignatureTextFromNode(node);
-    const lines=norm(text).split("\n").map(x=>x.trim()).filter(Boolean);
-    const score=signatureContainerScore(text,email);
-    if(score>-999 && lines.length<=30){
-      const completeness=(phones(text).businessPhone||phones(text).mobilePhone?5:0)+(address(text).state?5:0)+(inferPersonName(text)?2:0);
-      const candidate={node,text,score:score+completeness,lines:lines.length};
-      if(!best || candidate.score>best.score || (candidate.score===best.score&&candidate.lines>best.lines))best=candidate;
-    }
-  }
-  return best;
-}
-
-
-function forwardedIdentityMap(...texts){
-  const out=new Map();
-  for(const text of texts){
-    for(const line of norm(text||"").split("\n")){
-      const m=line.match(/^\s*From:\s*(.+)$/i);
-      if(!m)continue;
-      const id=headerIdentity(m[1]);
-      const e=cleanEmail(id.email);
-      if(e&&looksLikePersonName(id.name||""))out.set(e,cleanName(id.name));
-    }
-  }
-  return out;
-}
-
-function htmlBoundedSignatureForAnchor(anchor,email){
-  let best=null;
-  let node=anchor;
-  for(let depth=0;node&&depth<12;depth++,node=node.parentElement){
-    if(!node||!node.textContent)continue;
-    const tag=(node.tagName||"").toLowerCase();
-    if(tag==="body"||tag==="html")break;
-    const text=cleanSignatureText(visibleSignatureTextFromNode(node));
-    const lines=norm(text).split("\n").map(x=>x.trim()).filter(Boolean);
-    if(!text||lines.length<3||lines.length>14)continue;
-    if(!lines.some(l=>sameEmail(cleanEmail(l),email)))continue;
-    if(/^(?:from|sent|to|cc|bcc|subject):/im.test(text))continue;
-    if(/\b(?:good afternoon|good morning|good evening|payment options?|please see attached|please reach out|wire transfer|customer id|billing zip)\b/i.test(text))continue;
-    const ph=phones(text),ad=address(text),ttl=title(text,"");
-    const evidence=(ph.businessPhone||ph.mobilePhone?3:0)+(ad.state&&ad.postalCode?3:0)+(ttl?2:0)+(inferPersonName(text)?2:0);
-    if(evidence<4)continue;
-    // Prefer the smallest complete block. It is much less likely to contain message prose or a second signature.
-    const score=evidence*20-lines.length;
-    if(!best||score>best.score)best={score,text};
-  }
-  return best?best.text:"";
-}
-
-function htmlMailtoOccurrenceCandidates(html,plainText,currentName,currentEmail,myEmail){
-  const out=[];
-  try{
-    const doc=new DOMParser().parseFromString(html||"","text/html");
-    const visible=visibleSignatureTextFromNode(doc.body);
-    const ids=forwardedIdentityMap(plainText||"",visible||"");
-    const currentE=cleanEmail(currentEmail);
-    if(currentE&&!sameEmail(currentE,myEmail)&&looksLikePersonName(currentName||""))ids.set(currentE,cleanName(currentName));
-
-    const anchors=[...doc.querySelectorAll('a[href^="mailto:" i]')];
-    let serial=0;
-    for(const a of anchors){
-      const href=(a.getAttribute("href")||"");
-      const email=cleanEmail(decodeURIComponent(href.replace(/^mailto:/i,"").split("?")[0])||a.textContent||"");
-      if(!email||sameEmail(email,myEmail))continue;
-
-      const sig=htmlBoundedSignatureForAnchor(a,email);
-      if(!sig)continue;
-
-      const authoritativeName=ids.get(email)||"";
-      const inferred=inferAnchoredName(sig,email)||inferPersonName(sig);
-      const name=looksLikePersonName(authoritativeName)?authoritativeName:(inferred||"");
-      if(!name||!looksLikePersonName(name))continue;
-
-      const parsed=parseContactFromSignature(name,email,sig);
-      if(authoritativeName){
-        const np=nameParts(authoritativeName);
-        parsed.givenName=np.givenName;parsed.middleName=np.middleName;parsed.surname=np.surname;
-      }
-      parsed.email=email;
-      parsed.jobTitle=sanitizeJobTitle(parsed.jobTitle,name,sig);
-      parsed.signature=sig;
-      parsed.personalNotes=sig;
-      parsed._debug={source:"HTML mailto signature occurrence",headerAuthoritative:!!authoritativeName,headerName:authoritativeName||name,occurrence:serial,textSignature:"",htmlSignature:sig};
-      out.push({score:120,name,email,text:sig,parsed,headerAuthoritative:!!authoritativeName,occurrenceKey:`html-mailto:${serial}`,occurrence:serial});
-      serial++;
-    }
-  }catch(_){ }
-  return out;
-}
-
-function htmlSignatureCandidates(html,currentName,currentEmail,myEmail){
-  const out=new Map();
-  try{
-    const doc=new DOMParser().parseFromString(html||"","text/html");
-    const anchors=[...doc.querySelectorAll('a[href^="mailto:" i]')];
-    for(const a of anchors){
-      const href=(a.getAttribute("href")||"");
-      const email=cleanEmail(decodeURIComponent(href.replace(/^mailto:/i,"").split("?")[0])||a.textContent||"");
-      if(!email||sameEmail(email,myEmail))continue;
-      const best=findBestHtmlSignatureContainer(a,email);
-      if(!best||best.score<7)continue;
-      const sig=cleanSignatureText(best.text);
-      const inferred=inferAnchoredName(sig,email);
-      const name=(sameEmail(email,currentEmail)&&looksLikePersonName(currentName||""))?currentName:(inferred||email.split("@")[0]);
-      const parsed=parseContactFromSignature(name,email,sig);
-      const prev=out.get(email);
-      if(!prev||best.score>prev.score)out.set(email,{score:best.score,name,email,text:sig,parsed});
-    }
-  }catch(_){ }
-  return [...out.values()].map(x=>({name:x.name,email:x.email,text:x.text,parsed:x.parsed}));
-}
-function parsedCompleteness(p){
-  if(!p)return 0;
-  let score=0;
-  for(const k of ["street","city","state","postalCode","countryOrRegion","businessPhone","mobilePhone","companyName","businessHomePage","jobTitle"])if(String(p[k]||"").trim())score+=1;
-  const sigLines=norm(p.signature||"").split("\n").map(x=>x.trim()).filter(Boolean).length;
-  score+=Math.min(sigLines,10)/10;
-  return score;
-}
-function mergeParsed(primary,secondary,sourceLabel){
-  const a={...(primary||{})},b=secondary||{};
-  const fill=["givenName","middleName","surname","companyName","jobTitle","email","businessPhone","mobilePhone","businessFax","businessHomePage","street","city","state","postalCode","countryOrRegion"];
-  for(const k of fill)if(!String(a[k]||"").trim()&&String(b[k]||"").trim())a[k]=b[k];
-  // Country must be inferred independently whenever either parser found a valid U.S. state.
-  if(!a.countryOrRegion){const st=(a.state||b.state||"").toUpperCase();if(US_STATES.has(st))a.countryOrRegion="United States"}
-  // Prefer the more complete visible signature for Notes. This prevents a small HTML cell
-  // containing only the email address from replacing a richer text signature.
-  const aSig=cleanSignatureText(a.signature||""),bSig=cleanSignatureText(b.signature||"");
-  const aLines=aSig.split("\n").filter(Boolean).length,bLines=bSig.split("\n").filter(Boolean).length;
-  const aScore=parsedCompleteness({...a,signature:aSig}),bScore=parsedCompleteness({...b,signature:bSig});
-  if(bSig && (bLines>aLines || bScore>aScore+0.5))a.signature=bSig; else a.signature=aSig;
-  a.personalNotes=a.signature||"";
-  a._debug={source:sourceLabel||"merged",htmlSignature:primary?.signature||"",textSignature:secondary?.signature||"",htmlScore:aScore,textScore:bScore};
-  return a;
 }
 function diagnosticRows(parsed){
   const vals=[
@@ -2984,434 +2287,6 @@ function readBody(item){
   });
 }
 
-function mergeCandidatePair(h,t){
-  if(h&&t){
-    if(t.headerAuthoritative||t.parsed?._debug?.headerAuthoritative){
-      const parsed=mergeParsed(t.parsed,h.parsed,"Forwarded header/plain text authoritative; HTML fills blanks");
-      parsed.givenName=t.parsed.givenName;
-      parsed.middleName=t.parsed.middleName;
-      parsed.surname=t.parsed.surname;
-      parsed.email=t.parsed.email;
-      parsed.jobTitle=t.parsed.jobTitle||parsed.jobTitle;
-      parsed.signature=t.parsed.signature;
-      parsed.personalNotes=t.parsed.personalNotes;
-      parsed._debug={...(parsed._debug||{}),source:"Forwarded From header authoritative",headerAuthoritative:true,headerName:t.name};
-      return {...t,parsed,text:parsed.signature,headerAuthoritative:true};
-    }
-    const parsed=mergeParsed(h.parsed,t.parsed,"HTML + plain-text merged");
-    return {...h,parsed,text:parsed.signature};
-  }
-  if(h){
-    h.parsed._debug={source:"HTML only",htmlSignature:h.parsed.signature||"",textSignature:""};
-    return h;
-  }
-  if(t){
-    t.parsed._debug={...(t.parsed._debug||{}),source:t.headerAuthoritative?"Forwarded From header authoritative":"Plain text only",htmlSignature:"",textSignature:t.parsed.signature||""};
-    return t;
-  }
-  return null;
-}
-
-
-function chooseOccurrenceCandidates(textCandidates,htmlTextCandidates){
-  const byEmail=arr=>{
-    const m=new Map();
-    for(const c of arr||[]){const k=cleanEmail(c.email);if(!k)continue;if(!m.has(k))m.set(k,[]);m.get(k).push(c)}
-    return m;
-  };
-  const t=byEmail(textCandidates),h=byEmail(htmlTextCandidates),out=[];
-  const keys=new Set([...t.keys(),...h.keys()]);
-  for(const k of keys){
-    const ta=t.get(k)||[],ha=h.get(k)||[];
-    // Prefer the source that found more distinct bounded occurrences. On a tie prefer Outlook Text.
-    const chosen=ha.length>ta.length?ha:ta;
-    out.push(...chosen);
-  }
-  return out;
-}
-
-
-
-function lineHasPhone(line,phone){
-  const target=phoneForOutlook(phone||"").replace(/\D/g,"").slice(-10);
-  if(!target)return false;
-  return String(line||"").replace(/\D/g,"").includes(target);
-}
-
-function looseSignatureOccurrences(text,base){
-  const p=base?.parsed||base||{};
-  const name=base?.name||[p.givenName,p.middleName,p.surname].filter(Boolean).join(" ");
-  const np=nameParts(name||"");
-  const surname=String(np.surname||p.surname||"").trim();
-  const email=cleanEmail(base?.email||p.email||"");
-  if(!surname)return [];
-  const lines=norm(text||"").split("\n").map(x=>String(x||"").replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim());
-  const esc=surname.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
-  const surnameRx=new RegExp(`(?:^|\\s)${esc}(?:$|\\s|[,|•·—–-])`,`i`);
-  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  const out=[];
-  for(let i=0;i<lines.length;i++){
-    const line=lines[i];
-    if(!line||isHeader(line)||isClosingPhrase(line)||!surnameRx.test(line))continue;
-    const max=Math.min(lines.length-1,i+14);
-    let score=0,emailAt=-1,lastEvidence=i;
-    let sawBusiness=false,sawMobile=false,sawZip=false,sawStreet=false,sawTitle=false;
-    for(let j=i;j<=max;j++){
-      const v=lines[j];
-      if(j>i&&isHeader(v))break;
-      if(j>i&&surnameRx.test(v))break;
-      if(email&&String(v).toLowerCase().includes(email)){score+=4;emailAt=j;lastEvidence=j}
-      if(!sawBusiness&&p.businessPhone&&lineHasPhone(v,p.businessPhone)){score+=2;sawBusiness=true;lastEvidence=j}
-      if(!sawMobile&&p.mobilePhone&&lineHasPhone(v,p.mobilePhone)){score+=2;sawMobile=true;lastEvidence=j}
-      if(!sawZip&&p.postalCode&&String(v).includes(String(p.postalCode))){score+=1;sawZip=true;lastEvidence=j}
-      if(!sawStreet&&p.street){
-        const first=String(p.street).toLowerCase().split(/\s+/).filter(Boolean).slice(0,2).join(" ");
-        if(first&&String(v).toLowerCase().includes(first)){score+=1;sawStreet=true;lastEvidence=j}
-      }
-      if(!sawTitle&&p.jobTitle){
-        const words=String(p.jobTitle).toLowerCase().split(/[^a-z0-9]+/).filter(w=>w.length>3);
-        const hits=words.filter(w=>String(v).toLowerCase().includes(w)).length;
-        if(hits>=Math.min(2,words.length)){score+=2;sawTitle=true;lastEvidence=j}
-      }
-    }
-    if(score<5)continue;
-    let start=i;
-    if(i>0&&/^[A-Za-z][A-Za-z'.-]*$/.test(lines[i-1])&&!isClosingPhrase(lines[i-1]))start=i-1;
-    let end=Math.max(lastEvidence,emailAt>=0?emailAt:i);
-    for(let j=end+1;j<=Math.min(lines.length-1,end+2);j++){
-      const v=lines[j];
-      if(!v||isHeader(v)||surnameRx.test(v))break;
-      if(email&&String(v).toLowerCase().includes(email)){end=j;continue}
-      if(/^https?:|^www\./i.test(v)){end=j;continue}
-      break;
-    }
-    const sig=cleanSignatureText(lines.slice(start,end+1).filter(Boolean).join("\n"));
-    if(!sig)continue;
-    if(out.length&&start<=out[out.length-1].end)continue;
-    out.push({sig,start,end,occurrence:out.length,score:200+score});
-    i=end;
-  }
-  return out;
-}
-
-function canonicalNotesFromParsed(p,identityName=""){
-  const lines=[];
-  const name=cleanName(identityName||[p.givenName,p.middleName,p.surname].filter(Boolean).join(" "));
-  if(name)lines.push(name);
-  if(p.jobTitle)lines.push(p.jobTitle);
-  if(p.companyName)lines.push(p.companyName);
-  if(p.street)lines.push(p.street);
-  const cityLine=[p.city,[p.state,p.postalCode].filter(Boolean).join(" ")].filter(Boolean).join(", ");
-  if(cityLine)lines.push(cityLine);
-  if(p.businessPhone)lines.push(`Office: ${phoneForOutlook(p.businessPhone)}`);
-  if(p.mobilePhone)lines.push(`Mobile: ${phoneForOutlook(p.mobilePhone)}`);
-  if(p.businessFax)lines.push(`Fax: ${phoneForOutlook(p.businessFax)}`);
-  if(p.email)lines.push(cleanEmail(p.email));
-  if(p.businessHomePage)lines.push(p.businessHomePage);
-  return lines.filter(Boolean).join("\n");
-}
-
-function safeNotesSignature(raw,p,identityName=""){
-  const cleaned=cleanSignatureText(raw||"");
-  const lines=norm(cleaned).split("\n").map(x=>x.trim()).filter(Boolean);
-  const bodyNoise=/\b(?:good afternoon|good morning|good evening|please see attached|payment options?|remitted|wire transfer|customer id|billing zip|please reach out|attached invoices?)\b/i;
-  const hasHeader=/^(?:from|sent|to|cc|bcc|subject):/im.test(cleaned);
-  const plausible=cleaned&&lines.length>=2&&lines.length<=12&&!bodyNoise.test(cleaned)&&!hasHeader;
-  if(plausible)return cleaned;
-  return canonicalNotesFromParsed(p,identityName);
-}
-
-function enforceDuplicateMultiplicity(input,plainText,htmlVisible){
-  const groups=new Map();
-  for(const c of input||[]){
-    const key=cleanEmail(c.email||c.parsed?.email)||`name:${String(c.name||"").toLowerCase()}`;
-    if(!groups.has(key))groups.set(key,[]);
-    groups.get(key).push(c);
-  }
-  const out=[];
-  for(const group of groups.values()){
-    const base=group[0];
-    const textLoose=looseSignatureOccurrences(plainText||"",base);
-    const htmlLoose=looseSignatureOccurrences(htmlVisible||"",base);
-    const occs=htmlLoose.length>textLoose.length?htmlLoose:textLoose;
-    const wanted=Math.max(group.length,occs.length);
-    if(wanted<=group.length){out.push(...group);continue}
-    out.push(...group);
-    for(let i=group.length;i<wanted;i++){
-      const occ=occs[i]||occs[0];
-      const clone=JSON.parse(JSON.stringify(base));
-      clone.occurrence=i;
-      clone.occurrenceKey=`fingerprint:${cleanEmail(base.email||base.parsed?.email)}:${i}:${occ?.start??i}:${occ?.end??i}`;
-      clone.duplicateTotal=wanted;
-      if(occ?.sig){clone.text=occ.sig;clone.parsed.signature=occ.sig;clone.parsed.personalNotes=occ.sig}
-      clone.parsed._debug={...(clone.parsed._debug||{}),source:"Fingerprint duplicate occurrence fallback",occurrence:i};
-      out.push(clone);
-    }
-  }
-  return out;
-}
-
-function candidateDefaultChecked(total,index){
-  // Unique contacts stay selected as before. Duplicate signature occurrences require an explicit user choice.
-  return total<=1;
-}
-
-function rebuildCandidateFromOccurrence(base,occ,index,total){
-  const name=base.name||[base.parsed?.givenName,base.parsed?.middleName,base.parsed?.surname].filter(Boolean).join(" ");
-  const email=cleanEmail(base.email||base.parsed?.email||"");
-  const parsed=parseContactFromSignature(name,email,occ.sig);
-  if(looksLikePersonName(name)){
-    const np=nameParts(name);
-    parsed.givenName=np.givenName;parsed.middleName=np.middleName;parsed.surname=np.surname;
-  }
-  parsed.email=email;
-  parsed.jobTitle=sanitizeJobTitle(parsed.jobTitle,name,occ.sig);
-  parsed.signature=occ.sig;
-  parsed.personalNotes=occ.sig;
-  parsed._debug={source:"Final bounded signature occurrence",headerAuthoritative:!!base.headerAuthoritative,headerName:name,occurrence:index,textSignature:occ.sig,htmlSignature:""};
-  return {...base,name,email,text:occ.sig,parsed,occurrence:index,occurrenceKey:`final:${email}:${index}:${occ.start??index}:${occ.end??index}`,duplicateTotal:total};
-}
-
-function expandCandidatesByBodyOccurrences(input,plainText,htmlVisible){
-  const groups=new Map();
-  for(const c of input||[]){
-    const key=cleanEmail(c.email||c.parsed?.email)||`name:${String(c.name||"").toLowerCase()}`;
-    if(!groups.has(key))groups.set(key,[]);
-    groups.get(key).push(c);
-  }
-  const out=[];
-  for(const group of groups.values()){
-    const base=group[0];
-    const name=base.name||[base.parsed?.givenName,base.parsed?.middleName,base.parsed?.surname].filter(Boolean).join(" ");
-    const email=cleanEmail(base.email||base.parsed?.email||"");
-    let textOcc=email&&name?identitySignatureOccurrences(plainText||"",name,email):[];
-    let htmlOcc=email&&name?identitySignatureOccurrences(htmlVisible||"",name,email):[];
-    let occs=htmlOcc.length>textOcc.length?htmlOcc:textOcc;
-
-    // If an earlier parser already found more distinct occurrences, preserve those rather than collapse them.
-    if(group.length>occs.length){
-      const bounded=group.filter(x=>{
-        const s=String(x.parsed?.signature||"");
-        const lines=norm(s).split("\n").filter(Boolean).length;
-        return s&&lines<=14&&!/^(?:from|sent|to|cc|bcc|subject):/im.test(s)&&!/\b(?:payment options?|please see attached|please reach out|wire transfer|customer id|billing zip)\b/i.test(s);
-      });
-      if(bounded.length===group.length&&bounded.length>occs.length){out.push(...bounded);continue}
-    }
-
-    if(occs.length){
-      for(let i=0;i<occs.length;i++)out.push(rebuildCandidateFromOccurrence(base,occs[i],i,occs.length));
-    }else{
-      out.push(...group);
-    }
-  }
-  return out;
-}
-
-function finalizeCandidate(c){
-  if(!c||!c.parsed)return c;
-  const p=c.parsed;
-  const identity=c.name||[p.givenName,p.middleName,p.surname].filter(Boolean).join(" ");
-  p.jobTitle=sanitizeJobTitle(p.jobTitle,identity,p.signature||"");
-  let tight=tightNotesSignature(p.signature||c.text||"",identity,p.email||c.email||"");
-  tight=safeNotesSignature(tight,p,identity);
-  p.signature=tight;
-  p.personalNotes=tight;
-  c.text=tight;
-  return c;
-}
-
-
-
-function recoverCurrentSenderNameCompanyCandidates(bodyText,currentName,currentEmail,myEmail){
-  const name=cleanName(currentName||"");
-  const email=cleanEmail(currentEmail||"");
-  if(!bodyText||!name||!email||sameEmail(email,myEmail)||!looksLikePersonName(name))return [];
-
-  const segments=allMessageSegments(bodyText,name,email);
-  const current=segments[0];
-  if(!current?.text)return [];
-
-  const lines=norm(current.text).split("\n");
-  const cleanLine=v=>String(v||"")
-    .replace(/[\u00ad\u200b-\u200d\ufeff]/g,"")
-    .replace(/\u00a0/g," ")
-    .replace(/\s+/g," ")
-    .trim();
-
-  const nameRx=new RegExp(
-    "^"+name.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\s*(?:\\||•|·|—|–)\\s*(.+)$",
-    "i"
-  );
-  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l);
-  const out=[];
-
-  for(let i=0;i<lines.length;i++){
-    const first=cleanLine(lines[i]);
-    if(!first)continue;
-
-    const m=first.match(nameRx);
-    if(!m)continue;
-
-    const companyPart=String(m[1]||"").trim();
-    const companyLow=" "+companyPart.toLowerCase();
-
-    // This fallback is specifically for "Name | Company", not "Name | Title".
-    // Require clear company evidence to avoid reclassifying ordinary delimited text.
-    if(!companyPart||!COMPANY_WORDS.some(w=>companyLow.includes(w)))continue;
-
-    const raw=[first];
-    let end=i;
-    let nonblank=1;
-
-    for(let j=i+1;j<Math.min(lines.length,i+25)&&nonblank<12;j++){
-      const v=cleanLine(lines[j]);
-      if(!v)continue;
-      if(isHeader(v))break;
-      if(/^[-_=]{5,}$/.test(v))continue;
-
-      // A second matching signature start is a new physical occurrence.
-      if(j>i&&nameRx.test(v))break;
-
-      raw.push(v);
-      end=j;
-      nonblank++;
-
-      // Stop once we have enough complete contact evidence and the next
-      // meaningful content would be outside this compact signature.
-      if(raw.length>=4){
-        const sigNow=cleanSignatureText(raw.join("\n"));
-        const ph=phones(sigNow);
-        const ad=address(sigNow);
-        if((ph.businessPhone||ph.mobilePhone) && ad.state && ad.postalCode){
-          // Keep looking only until a message header; this allows a website
-          // after the phone/address without leaking into quoted history.
-          continue;
-        }
-      }
-    }
-
-    const sig=cleanSignatureText(raw.join("\n"));
-    if(!sig||signatureEvidenceScore(raw)<5)continue;
-
-    const parsed=parseContactFromSignature(name,email,sig);
-    parsed.companyName=companyPart;
-    parsed.signature=sig;
-    parsed.personalNotes=sig;
-    parsed._debug={...(parsed._debug||{}),source:"Current sender name + company recovery"};
-
-    if(!parsed.givenName||!parsed.surname)continue;
-    if(!parsed.businessPhone&&!parsed.mobilePhone&&!parsed.street&&!parsed.businessHomePage)continue;
-
-    out.push({
-      score:100,
-      name,
-      email,
-      text:sig,
-      parsed,
-      candidateType:"signature",
-      physicalOccurrence:true,
-      occurrenceKey:`current-name-company:${current.start||0}:${i}:${end}`,
-      globalStart:(current.start||0)+i,
-      globalEnd:(current.start||0)+end
-    });
-  }
-
-  return out;
-}
-
-
-function recoverCurrentSenderSignatureCandidates(bodyText,currentName,currentEmail,myEmail){
-  const email=cleanEmail(currentEmail||"");
-  if(!bodyText||!email||sameEmail(email,myEmail))return [];
-
-  const segments=allMessageSegments(bodyText,currentName||"",email);
-  const current=segments[0];
-  if(!current?.text)return [];
-
-  const lines=norm(current.text).split("\n");
-  const cleanLine=v=>String(v||"")
-    .replace(/[\u00ad\u200b-\u200d\ufeff]/g,"")
-    .replace(/\u00a0/g," ")
-    .replace(/\s+/g," ")
-    .trim();
-  const isMessageHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l);
-
-  const out=[];
-
-  for(let i=0;i<lines.length;i++){
-    const v=cleanLine(lines[i]);
-    if(!v||cleanEmail(v)!==email)continue;
-
-    // Find a human signer above the current sender email. A graphic/divider
-    // line may sit between the company name and phone/email, so do not treat
-    // underscores/dashes as an Outlook message boundary here.
-    let nameIdx=-1;
-    for(let j=i-1;j>=Math.max(0,i-24);j--){
-      const b=cleanLine(lines[j]);
-      if(!b)continue;
-      if(isMessageHeader(b))break;
-      if(/^[-_=]{5,}$/.test(b))continue;
-      if(isClosingPhrase(b))continue;
-      if(looksLikePersonName(b)){
-        nameIdx=j;
-        break;
-      }
-    }
-    if(nameIdx<0)continue;
-
-    let end=i;
-    let nonblankAfterEmail=0;
-    for(let j=i+1;j<Math.min(lines.length,i+40);j++){
-      const f=cleanLine(lines[j]);
-      if(!f)continue;
-      if(isMessageHeader(f))break;
-      if(/^[-_=]{5,}$/.test(f))continue;
-      if(cleanEmail(f)&&cleanEmail(f)!==email)break;
-
-      end=j;
-      nonblankAfterEmail++;
-
-      const candidateText=lines.slice(nameIdx,end+1)
-        .map(cleanLine)
-        .filter(x=>x&&!/^[-_=]{5,}$/.test(x))
-        .join("\n");
-      const ad=address(candidateText);
-      if(ad.street&&ad.state&&ad.postalCode)break;
-
-      if(nonblankAfterEmail>=10&&f.length>100&&/[.!?]$/.test(f))break;
-    }
-
-    const raw=lines.slice(nameIdx,end+1)
-      .map(cleanLine)
-      .filter(x=>x&&!/^[-_=]{5,}$/.test(x));
-    const sig=cleanSignatureText(raw.join("\n"));
-    if(!sig)continue;
-
-    const parsed=parseContactFromSignature("",email,sig);
-    if(!parsed.givenName||!parsed.surname)continue;
-    if(!parsed.businessPhone&&!parsed.mobilePhone&&!parsed.businessHomePage&&!parsed.street)continue;
-
-    parsed.personalNotes=parsed.signature||sig;
-    parsed._debug={...(parsed._debug||{}),source:"Current sender signature recovery"};
-
-    out.push({
-      score:100,
-      name:[parsed.givenName,parsed.middleName,parsed.surname].filter(Boolean).join(" "),
-      email,
-      text:parsed.signature||sig,
-      parsed,
-      candidateType:"signature",
-      physicalOccurrence:true,
-      occurrenceKey:`current-recovery:${current.start||0}:${nameIdx}:${i}`,
-      globalStart:(current.start||0)+nameIdx,
-      globalEnd:(current.start||0)+end
-    });
-  }
-  return out;
-}
-
-
-
 function signatureDiscoveryText(body){
   return norm(body).split("\n").map(line=>{
     let v=String(line||"");
@@ -3420,105 +2295,6 @@ function signatureDiscoveryText(body){
     v=v.replace(/\s*\(\s*(?:https?:\/\/|mailto:|tel:)[^)\r\n]*\)\s*/gi," ");
     return v.replace(/[ \t]+$/g,"");
   }).join("\n");
-}
-
-function enrichMissingExplicitAddressFromBody(candidate,bodyText){
-  if(!candidate?.parsed)return candidate;
-  const p=candidate.parsed;
-  if(p.street||p.city||p.state||p.postalCode||p.countryOrRegion)return candidate;
-
-  const email=cleanEmail(candidate.email||p.email||"");
-  if(!email||!bodyText)return candidate;
-
-  const lines=norm(bodyText).split("\n");
-  const isHeader=l=>/^\s*(from|sent|to|cc|bcc|subject):\s*/i.test(l)||/^[-_]{5,}$/.test(l);
-  const matches=[];
-
-  const cleanLine=v=>String(v||"")
-    .replace(/[\u00ad\u200b-\u200d\ufeff]/g,"")
-    .replace(/\u00a0/g," ")
-    .replace(/\s+/g," ")
-    .trim();
-
-  const companyKey=String(p.companyName||"").toLowerCase()
-    .replace(/[^a-z0-9]+/g," ")
-    .split(/\s+/).filter(w=>w.length>3).slice(0,3);
-
-  const identity=candidate.name||[p.givenName,p.middleName,p.surname].filter(Boolean).join(" ");
-  const surname=String(nameParts(identity||"").surname||"").toLowerCase();
-
-  for(let i=0;i<lines.length;i++){
-    const line=cleanLine(lines[i]);
-    if(!line)continue;
-    const found=cleanEmail(line);
-    if(!found||found!==email)continue;
-
-    const tail=[];
-    let nonblank=0;
-    for(let j=i+1;j<lines.length&&j<=i+45&&nonblank<10;j++){
-      const v=cleanLine(lines[j]);
-      if(!v)continue;
-      if(isHeader(v))break;
-      if(cleanEmail(v)&&cleanEmail(v)!==email)break;
-      nonblank++;
-      tail.push(v);
-
-      const combined=cleanSignatureText(
-        [p.signature||candidate.text||"",...tail].filter(Boolean).join("\n")
-      );
-      const ad=address(combined);
-      if(ad.street&&ad.state&&ad.postalCode){
-        let score=0;
-        const before=[];
-        for(let k=i-1;k>=0&&k>=i-30&&before.length<12;k--){
-          const b=cleanLine(lines[k]);
-          if(!b)continue;
-          if(isHeader(b))break;
-          before.unshift(b);
-        }
-        const nearby=before.join(" ").toLowerCase();
-        if(p.businessPhone&&lineHasPhone(nearby,p.businessPhone))score+=4;
-        if(p.mobilePhone&&lineHasPhone(nearby,p.mobilePhone))score+=3;
-        if(surname&&nearby.includes(surname))score+=2;
-        if(companyKey.length&&companyKey.some(w=>nearby.includes(w)))score+=2;
-
-        matches.push({
-          score,
-          ad,
-          signature:combined,
-          addressKey:[ad.street,ad.city,ad.state,ad.postalCode].join("|").toLowerCase()
-        });
-        break;
-      }
-
-      // Do not wander into normal prose after a signature.
-      if(v.length>120&&/[.!?]$/.test(v))break;
-    }
-  }
-
-  if(!matches.length)return candidate;
-  matches.sort((a,b)=>b.score-a.score);
-  const topScore=matches[0].score;
-  const top=matches.filter(x=>x.score===topScore);
-  const uniqueAddresses=new Set(top.map(x=>x.addressKey));
-
-  // If equally plausible occurrences point to different addresses, do nothing.
-  if(uniqueAddresses.size>1)return candidate;
-
-  const best=top[0];
-  p.street=best.ad.street;
-  p.city=best.ad.city;
-  p.state=best.ad.state;
-  p.postalCode=best.ad.postalCode;
-  p.countryOrRegion=best.ad.countryOrRegion||usCountry(best.ad.state);
-
-  // The discovered address is part of the same explicit signature tail, so keep
-  // Notes/preview complete as well.
-  p.signature=best.signature;
-  p.personalNotes=best.signature;
-  candidate.text=best.signature;
-  p._debug={...(p._debug||{}),addressEnrichedFromNearbyExplicitSignature:true};
-  return candidate;
 }
 
 async function scan(){try{
@@ -3530,13 +2306,12 @@ async function scan(){try{
   const textSignatureBody=signatureDiscoveryText(textBody);
   const textSignatures=structuredDiscoverSignatures(
     textSignatureBody,from.displayName||"",from.emailAddress||"",myEmail
-  ).map(c=>v4AttachOriginalSignatureBlock(textSignatureBody,c));
+  );
 
   const htmlVisible=body.html?htmlBodyToText(body.html):"";
   const htmlSignatureVisible=signatureDiscoveryText(htmlVisible);
   const htmlSignatures=htmlSignatureVisible
     ? structuredDiscoverSignatures(htmlSignatureVisible,from.displayName||"",from.emailAddress||"",myEmail)
-        .map(c=>v4AttachOriginalSignatureBlock(htmlSignatureVisible,c))
     : [];
 
   // Never let one representation replace the other wholesale. Preserve the
@@ -3559,18 +2334,21 @@ async function scan(){try{
     }catch(ocrErr){console.warn("Image signature OCR fallback failed",ocrErr)}
   }
 
-  const addressSource=textSignatureBody||htmlSignatureVisible||"";
-  signatureCandidates=signatureCandidates.map(c=>enrichMissingExplicitAddressFromBody(c,addressSource));
-
   candidates=[...signatureCandidates,...referralCandidates];
 
   candidates=candidates.map(c=>{
     if(!c?.parsed)return c;
     if(c.candidateType!=="referral"){
-      const identity=c.name||[c.parsed.givenName,c.parsed.middleName,c.parsed.surname].filter(Boolean).join(" ");
+      // Stage 2: parse the already-frozen Stage 1 block.  Parsing may populate
+      // fields, but it may never alter the preserved signature or Notes.
       const sourceBlock=c.rawSignatureBlock||c.parsed.signature||c.text||"";
-      const reparsed=v4ContactFromSignature(identity,c.email||c.parsed.email||"",sourceBlock);
-      reparsed._debug={...(c.parsed._debug||{}),...(reparsed._debug||{})};
+      const visibleIdentity=inferPersonName(sourceBlock)||c.name||[c.parsed.givenName,c.parsed.middleName,c.parsed.surname].filter(Boolean).join(" ");
+      const reparsed=v4ContactFromSignature(visibleIdentity,c.email||c.parsed.email||"",sourceBlock);
+      reparsed.signature=sourceBlock;
+      reparsed.personalNotes=sourceBlock;
+      reparsed._debug={...(c.parsed._debug||{}),...(reparsed._debug||{}),source:"Stage 2 parse of immutable signature block"};
+      c.name=visibleIdentity||c.name;
+      c.text=sourceBlock;
       c.parsed=reparsed;
     }
     if(c.candidateType==="referral")c.parsed.personalNotes=c.parsed.signature||"";
@@ -3614,16 +2392,6 @@ function editableFields(p,idx,existing=null){
     return `<div class="field ${["email","street"].includes(k)?"full":""}"><label>${html(l)}</label><input data-review="${idx}" data-field="${k}" value="${html(initial)}"></div>`
   }).join("")}</div>`
 }
-function comparisonRows(parsed,existing){
-  return Object.entries(FIELD_META).map(([key,label])=>{
-    const nv=(parsed[key]||"").trim(),ov=(existing[key]||"").trim();
-    const same=nv&&ov&&n(nv)===n(ov);
-    const state=!nv?"No value found in email":same?"Same":"Different / new";
-    const cls=!nv?"missing":same?"same":"changed";
-    return `<div class="compare-row ${cls}"><div class="compare-label">${html(label)}</div><div><span class="compare-head">Existing Outlook</span><div>${html(ov||"(blank)")}</div></div><div><span class="compare-head">From email</span><div>${html(nv||"(not found)")}</div></div><div class="compare-state">${html(state)}</div></div>`
-  }).join("")
-}
-
 function unaccountedSignaturePanel(p){
   const value=String(p?._audit?.unaccountedText||"").trim();
   const shown=value||"None";
