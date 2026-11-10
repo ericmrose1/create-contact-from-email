@@ -4,7 +4,7 @@ const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/st
 const {test}=require('node:test'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'..','app.js'),'utf8').replace(/^import\s+[^\n]+\n/,'');
 const ctx={console,URL,Office:{onReady(){}},setTimeout,clearTimeout};
-vm.runInNewContext(source+'\n;globalThis.TEST_API={captureSignatureBlocks,structuredAddress,structuredPhones,signatureDiscoveryText,phoneForOutlook,graphPayload,fieldDiffs};',ctx,{filename:'app.js'});
+vm.runInNewContext(source+'\n;globalThis.TEST_API={captureSignatureBlocks,structuredAddress,structuredPhones,signatureDiscoveryText,phoneForOutlook,graphPayload,fieldDiffs,compactSignatureNotes};',ctx,{filename:'app.js'});
 const p=ctx.TEST_API, own='owner@example.com';
 const first=[
 'Anna','','Marsh','','Sales & Marketing Director','','Northbridge US Inc',
@@ -30,13 +30,17 @@ test('finds two Anna and one Peter signatures under a shared sender',()=>{
  assert.equal(c.filter(x=>x.name==='Peter Hale').length,1);
  assert(c.every(x=>x.email!==own));
 });
-test('Notes preserve complete widely spaced signatures',()=>{
+test('Notes remove empty layout lines but retain every real signature line',()=>{
  const c=candidates().filter(x=>x.name==='Anna Marsh');
  for(const x of c){
   assert(x.parsed.personalNotes.includes('anna@example.com'));
   assert(x.parsed.personalNotes.includes('1 International Plaza'));
   assert(x.parsed.personalNotes.includes('+44 01922 714082'));
-  assert.equal(x.parsed.personalNotes,x.rawSignatureBlock);
+  assert(x.rawSignatureBlock.includes('\n\n'), 'source preview remains unmodified');
+  assert(!/\n\s*\n/.test(x.parsed.personalNotes), 'Notes has no blank lines');
+  assert.equal(x.parsed.personalNotes,p.compactSignatureNotes(x.rawSignatureBlock));
+  assert.equal(x.parsed.personalNotes.split('\n').length,
+    x.rawSignatureBlock.split('\n').filter(line=>line.trim()).length);
  }
 });
 test('signature name and email override shared sender metadata',()=>{
@@ -86,7 +90,7 @@ test('Graph payload retains international numbers, postcode, and Notes',()=>{
  assert.equal(body.mobilePhone,'+441922714077');
  assert.equal(body.businessPhones[0],'+441922711185');
  assert.equal(body.businessAddress.postalCode,'WS9 0SW');
- assert.equal(body.personalNotes,c.rawSignatureBlock);
+ assert.equal(body.personalNotes,p.compactSignatureNotes(c.rawSignatureBlock));
 });
 test('comparison does not report identical name or email as differences',()=>{
  const old={givenName:'Anna',surname:'Marsh',email:'anna@example.com'};
@@ -99,4 +103,19 @@ test('prose Good News is not falsely treated as a person',()=>{
   'Good','News','This week we have a delivery.','Email: team@example.com'].join('\n');
  const found=p.captureSignatureBlocks(bad,'Team','desk@example.com',own);
  assert(!found.some(x=>x.name==='Good News'));
+});
+
+test('Notes formatter trims whitespace-only and zero-width lines, never merges content',()=>{
+ const raw='  Name   \r\n \r\n\u200b\r\n  Job Title  \r\n\r\n  +44 01922 714082 (DD)  \r\n\r\n  person@example.com  ';
+ const result=p.compactSignatureNotes(raw);
+ assert.equal(result,'Name\nJob Title\n+44 01922 714082 (DD)\nperson@example.com');
+ assert.equal(p.compactSignatureNotes(result),result,'idempotent formatting');
+ assert.equal(raw.includes('\r\n\r\n'),true,'source remains untouched');
+});
+test('UK signature and Graph Notes contain no extra empty lines',()=>{
+ const x=candidates().find(y=>y.name==='Peter Hale');
+ assert(x);
+ assert(!/\n\s*\n/.test(x.parsed.personalNotes));
+ assert.equal(p.graphPayload(x.parsed).personalNotes,x.parsed.personalNotes);
+ assert(x.rawSignatureBlock.includes('\n\n'));
 });
