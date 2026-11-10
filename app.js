@@ -809,6 +809,15 @@ function v4DisplayText(value){
     .replace(/\u0095/g,"•").replace(/\u0096/g,"–")
     .replace(/\u0097/g,"—").replace(/\u0085/g,"…");
 }
+// Notes are plain text. Keep the full immutable signature for discovery,
+// parsing and preview, but remove layout-only empty lines in the Notes copy.
+// Every nonblank line remains in its original order with its text intact.
+function compactSignatureNotes(signatureText){
+  return norm(signatureText||"").split("\n")
+    .map(line=>String(line).replace(/[\u00ad\u200b-\u200d\ufeff]/g,"").trim())
+    .filter(Boolean)
+    .join("\n");
+}
 function v4VisibleSignatureBlock(signatureText){
   return v4DisplayText(signatureDiscoveryText(norm(signatureText||"")))
     .split("\n")
@@ -1383,7 +1392,7 @@ function v4ContactFromSignature(senderName,senderEmail,signatureText){
   if(np.surname)base.surname=np.surname+(credentials.length?", "+credentials.join(", "):"");
 
   base.signature=original;
-  base.personalNotes=original;
+  base.personalNotes=compactSignatureNotes(original);
 
   let audit=v4AuditSignature(original,base,resolvedName,credentials);
   if(audit.unaccounted.length&&(!base.jobTitle||!base.companyName)){
@@ -1842,9 +1851,9 @@ function captureSegmentSignatureBlocks(segment,myEmail){
     const visibleName=localNames.get(start)?.name||visibleNameAtLine(lines[start],identityName)||inferPersonName(cap.block)||identityName;
     const email=localNames.get(start)?.email||cleanEmail(cap.block)||identityEmail;
     const parsed=v4ContactFromSignature(visibleName,email,cap.block);
-    // Freeze Stage 1 output.  No parser may rewrite Notes or the source block.
+    // Freeze the full Stage 1 source. Notes is a separate compact text copy.
     parsed.signature=cap.block;
-    parsed.personalNotes=cap.block;
+    parsed.personalNotes=compactSignatureNotes(cap.block);
     parsed._debug={...(parsed._debug||{}),source:"Stage 1 immutable signature capture",capturedStart:cap.start,capturedEnd:cap.end};
     out.push({
       score:100,name:visibleName||identityName,email,text:cap.block,rawSignatureBlock:cap.block,
@@ -1877,7 +1886,7 @@ function captureGenericSignatureBlocks(body,myEmail,claimed){
     const cap=captureSignatureFromStart(lines,start,name,email);
     if(!cap||overlaps(cap.start,cap.end))continue;
     const parsed=v4ContactFromSignature(name,email,cap.block);
-    parsed.signature=cap.block;parsed.personalNotes=cap.block;
+    parsed.signature=cap.block;parsed.personalNotes=compactSignatureNotes(cap.block);
     parsed._debug={...(parsed._debug||{}),source:"Stage 1 generic immutable signature capture",capturedStart:cap.start,capturedEnd:cap.end};
     out.push({score:70,name,email,text:cap.block,rawSignatureBlock:cap.block,parsed,candidateType:"signature",physicalOccurrence:true,occurrenceKey:`generic-capture:${cap.start}:${cap.end}`,globalStart:cap.start,globalEnd:cap.end});
     ranges.push({start:cap.start,end:cap.end});
@@ -2437,18 +2446,18 @@ async function scan(){try{
     if(!c?.parsed)return c;
     if(c.candidateType!=="referral"){
       // Stage 2: parse the already-frozen Stage 1 block.  Parsing may populate
-      // fields, but it may never alter the preserved signature or Notes.
+      // fields, but it must not alter the preserved source signature.
       const sourceBlock=c.rawSignatureBlock||c.parsed.signature||c.text||"";
       const visibleIdentity=(c.name&&looksLikePersonName(c.name)?c.name:"")||inferPersonName(sourceBlock)||c.name||[c.parsed.givenName,c.parsed.middleName,c.parsed.surname].filter(Boolean).join(" ");
       const reparsed=v4ContactFromSignature(visibleIdentity,c.email||c.parsed.email||"",sourceBlock);
       reparsed.signature=sourceBlock;
-      reparsed.personalNotes=sourceBlock;
+      reparsed.personalNotes=compactSignatureNotes(sourceBlock);
       reparsed._debug={...(c.parsed._debug||{}),...(reparsed._debug||{}),source:"Stage 2 parse of immutable signature block"};
       c.name=visibleIdentity||c.name;
       c.text=sourceBlock;
       c.parsed=reparsed;
     }
-    if(c.candidateType==="referral")c.parsed.personalNotes=c.parsed.signature||"";
+    if(c.candidateType==="referral")c.parsed.personalNotes=compactSignatureNotes(c.parsed.signature||"");
     return c
   });
 
@@ -2512,7 +2521,7 @@ function renderReviews(items){
       actionArea=`<div class="toolbar"><button class="btn primary" data-action="create" data-index="${idx}">Create Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`;
     }
 
-    el.innerHTML=`${badge}<div class="candidate-name" style="margin-top:6px">${html([p.givenName,p.middleName,p.surname].filter(Boolean).join(" ")||it.name)}</div><div class="muted">${html(p.email||it.email||"")}</div><div class="signature-sticky"><div class="sig-title">Original signature block from email — preserved in Notes</div><pre>${html(p.signature||"No signature block confidently found")}</pre></div>${unaccountedSignaturePanel(p)}${diagnosticPanel(p)}${editableFields(p,idx,null)}${actionArea}`;
+    el.innerHTML=`${badge}<div class="candidate-name" style="margin-top:6px">${html([p.givenName,p.middleName,p.surname].filter(Boolean).join(" ")||it.name)}</div><div class="muted">${html(p.email||it.email||"")}</div><div class="signature-sticky"><div class="sig-title">Original signature block from email — compacted in Notes</div><pre>${html(p.signature||"No signature block confidently found")}</pre></div>${unaccountedSignaturePanel(p)}${diagnosticPanel(p)}${editableFields(p,idx,null)}${actionArea}`;
     box.appendChild(el);
   });
   $("reviewSection").hidden=false;
@@ -2522,7 +2531,7 @@ function renderReviews(items){
     const ta=document.querySelector(`textarea[data-review="${idx}"][data-field="personalNotes"]`);
     if(!ta)return;
     if(e.currentTarget.dataset.notesAction==="clear")ta.value="";
-    else ta.value=(window.__reviewItems[idx]?.parsed?.signature||"");
+    else ta.value=compactSignatureNotes(window.__reviewItems[idx]?.parsed?.signature||"");
     ta.focus();
   }));
 }
