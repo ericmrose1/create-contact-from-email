@@ -29,11 +29,14 @@ function structuredResolvedName(senderName,signatureText){
   if(a.length>=2&&a.length===b.length&&[...a].sort().join("|")===[...b].sort().join("|"))return inferred;
   return sender;
 }
-function phoneForOutlook(value){
+function phoneForOutlook(value,country=""){
   const raw=String(value||"").trim();if(!raw)return"";
   const extMatch=raw.match(/(?:^|\s)(?:x|ext\.?|extension)\s*[:.\-]?\s*(\d+)\s*$/i);
   const ext=extMatch?extMatch[1]:"";
-  const main=(extMatch?raw.slice(0,extMatch.index):raw).replace(/\D/g,"");
+  const original=(extMatch?raw.slice(0,extMatch.index):raw).trim();
+  const main=original.replace(/\D/g,"");
+  if(/^\+44/.test(original)){const national=main.slice(2).replace(/^0/,"");return "+44"+national+(ext?"x"+ext:"");}
+  if(country==="United Kingdom"&&/^0\d{10}$/.test(main))return "+44"+main.slice(1)+(ext?"x"+ext:"");
   let d=main;if(d.length===11&&d.startsWith("1"))d=d.slice(1);
   return ext?`${d}x${ext}`:d;
 }
@@ -519,9 +522,9 @@ function structuredStateAbbrev(v){
   return US_STATE_NAMES[raw.toLowerCase()]||"";
 }
 
-function structuredPhoneObservations(sig){
+function structuredPhoneObservations(sig,country=""){
   const observations=[];
-  const re=/(?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4}(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*\d+)?/gi;
+  const re=/(?<!\d)(?:\+44\s*(?:\(0\)\s*|0\s*)?|0)(?:\d[\s().-]*){8,10}\d(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*\d+)?(?!\d)|(?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]*)\d{3}[\s.\-]*\d{4}(?:\s*(?:x|ext\.?|extension)\s*[:.\-]?\s*\d+)?/gi;
 
   const tokenLabel=token=>{
     const t=String(token||"").toLowerCase().replace(/[().]/g,"").replace(/\s+/g," ").trim();
@@ -529,19 +532,19 @@ function structuredPhoneObservations(sig){
     if(/^(?:fax|f)$/.test(t))return"fax";
     if(/^(?:mobile|cell|cellular|m|c)$/.test(t))return"mobile";
     if(/^(?:office|business|work|main|telephone|phone|tel|p|o|b|w)$/.test(t))return"business";
-    if(/^(?:direct|d)$/.test(t))return"direct";
+    if(/^(?:direct|d|dd|ddi)$/.test(t))return"direct";
     return"";
   };
 
   const prefixLabel=segment=>{
     const s=String(segment||"");
-    const m=s.match(/(?:^|[|•;,]\s*|\s+)(direct\s*[/&+\-]\s*text|direct text|text\s*[/&+\-]\s*direct|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|[PBOMCFDW])\s*[:.\-]?\s*$/i);
+    const m=s.match(/(?:^|[|•;,]\s*|\s+)(direct\s*[/&+\-]\s*text|direct text|text\s*[/&+\-]\s*direct|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|ddi|dd|[PBOMCFDW])\s*[:.\-]?\s*$/i);
     return m?tokenLabel(m[1]):"";
   };
 
   const suffixLabel=segment=>{
     const s=String(segment||"");
-    let m=s.match(/^\s*(?:[|•;,]\s*)?\(\s*(direct\s*[/&+\-]\s*text|direct text|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|[BOMCFDW])\s*\)/i);
+    let m=s.match(/^\s*(?:[|•;,]\s*)?\(\s*(direct\s*[/&+\-]\s*text|direct text|office|business|work|main|telephone|phone|tel|mobile|cell|cellular|fax|direct|ddi|dd|[BOMCFDW])\s*\)/i);
     if(m)return tokenLabel(m[1]);
     // A bare word after one number is often the prefix for the NEXT number
     // ("Mobile 970... Office 720...").  Treat a word as a suffix only when
@@ -556,7 +559,7 @@ function structuredPhoneObservations(sig){
     const matches=[...line.matchAll(re)];
     for(let k=0;k<matches.length;k++){
       const m=matches[k];
-      const value=phoneForOutlook(m[0]); if(!value)continue;
+      const value=phoneForOutlook(m[0],country); if(!value)continue;
       const start=m.index||0,end=start+m[0].length;
       const prevEnd=k?((matches[k-1].index||0)+matches[k-1][0].length):0;
       const nextStart=k+1<matches.length?(matches[k+1].index||line.length):line.length;
@@ -579,18 +582,19 @@ function structuredPhoneObservations(sig){
   }
   return [...by.values()];
 }
-function structuredPhones(sig){
-  const obs=structuredPhoneObservations(sig);
+function structuredPhones(sig,country=""){
+  const obs=structuredPhoneObservations(sig,country);
   const out={businessPhone:"",mobilePhone:"",businessFax:""};
   const take=(kind,o)=>{if(o&&!out[kind])out[kind]=o.value};
   const fax=obs.filter(o=>o.label==="fax");
   const bus=obs.filter(o=>o.label==="business");
-  const mob=obs.filter(o=>o.label==="mobile"||o.label==="directtext");
+  const mob=obs.filter(o=>o.label==="mobile");
+  const directText=obs.filter(o=>o.label==="directtext");
   const direct=obs.filter(o=>o.label==="direct");
   const unlabeled=obs.filter(o=>!o.label);
   take("businessFax",fax[0]);
   take("businessPhone",bus[0]);
-  take("mobilePhone",mob[0]);
+  take("mobilePhone",mob[0]||directText[0]);
 
   // Direct with an extension is a company/direct-dial number, so Business.
   for(const o of direct.filter(x=>x.hasExtension))take("businessPhone",o);
@@ -600,9 +604,9 @@ function structuredPhones(sig){
   for(const o of unlabeled)take("businessPhone",o);
 
   for(const o of direct.filter(x=>!x.hasExtension)){
-    if(out.businessPhone && out.businessPhone!==o.value)take("mobilePhone",o);
-    else if(!out.mobilePhone && (bus.length||unlabeled.some(x=>x.value!==o.value)))take("mobilePhone",o);
-    else take("businessPhone",o);
+    // Use Direct Dial as Mobile only when no explicitly identified Mobile exists.
+    if(!out.mobilePhone)take("mobilePhone",o);
+    else if(!out.businessPhone)take("businessPhone",o);
   }
 
   // If only an explicit mobile existed, a remaining unlabeled number is Business.
@@ -624,6 +628,35 @@ function structuredPhones(sig){
 }
 
 function structuredAddress(sig){
+  // Royal Mail postcode syntax; never invent an American state for a UK address.
+  const ukLines=norm(sig).split("\n").map(x=>String(x||"").replace(/\u00a0/g," ").trim()).filter(Boolean);
+  const ukPost=/(?:\bGIR\s?0AA\b|\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b)/i;
+  for(let i=0;i<ukLines.length;i++){
+    const hit=ukLines[i].match(ukPost);if(!hit)continue;
+    const postalCode=hit[0].toUpperCase().replace(/\s+/g,"").replace(/(.{3})$/, " $1");
+    const before=ukLines[i].slice(0,hit.index).replace(/[?,;\s]+$/g,"");
+    const components=before.split(",").map(x=>x.replace(/^[?\s]+/g,"").trim()).filter(Boolean);
+    let city=components.length?components[components.length-1]:"";
+    let street=components.length>=2?components[components.length-2]:"";
+    if(!city&&i>0){city=ukLines[i-1].trim();if(i>1)street=ukLines[i-2].trim();}
+    else if(!street&&i>0)street=ukLines[i-1].trim();
+    if(city&&/^(?:united kingdom|uk|england|scotland|wales|northern ireland)$/i.test(city))city="";
+    if(street&&/[@<>]|https?:|^www\./i.test(street))street="";
+    return {street,city,state:"",postalCode,countryOrRegion:"United Kingdom"};
+  }
+  // A common Outlook line wrap places "Street, City," immediately before
+  // a separate "ST 12345" line. Keep the street rather than dropping it.
+  for(let i=1;i<ukLines.length;i++){
+    const stateZip=ukLines[i].match(/^([A-Z]{2})\s*,?\s*(\d{5}(?:-\d{4})?)$/);
+    if(!stateZip||!structuredStateAbbrev(stateZip[1]))continue;
+    const preceding=ukLines[i-1].replace(/[,\s]+$/g,"");
+    const parts=preceding.split(",").map(x=>x.trim()).filter(Boolean);
+    if(parts.length<2)continue;
+    const street=parts.slice(0,-1).join(", ");
+    const city=parts[parts.length-1];
+    if(!street||!city||!(/\d/.test(street)||/\b(?:street|road|rd|avenue|ave|drive|plaza|place|lane|boulevard)\b/i.test(street)))continue;
+    return {street,city,state:stateZip[1],postalCode:stateZip[2],countryOrRegion:"United States"};
+  }
   const legacy=address(sig);
   if(legacy.street&&legacy.city&&legacy.state&&legacy.postalCode)return legacy;
   const lines=norm(sig).split("\n").map(x=>String(x||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim()).filter(Boolean);
@@ -1374,7 +1407,7 @@ function structuredContactFromSignature(senderName,senderEmail,signatureText){
   const email=cleanEmail(senderEmail)||cleanEmail(sig);
   const site=website(sig,email);
   const addr=structuredAddress(sig);
-  const ph=structuredPhones(sig);
+  const ph=structuredPhones(sig,addr.countryOrRegion);
   const np=nameParts(resolvedName||"");
 
   const assigned=new Set();
@@ -1696,7 +1729,7 @@ function captureSignatureFromStart(lines,start,identityName,identityEmail){
       blankRun++;
       // Outlook often inserts a blank line between every signature row.  Only a
       // long visual gap is considered a boundary, and only after content exists.
-      if(blankRun>=3&&nonblank>=2)break;
+      if(blankRun>=3&&nonblank>=2&&!signatureContinuationAhead(lines,j))break;
       end=j;
       continue;
     }
@@ -1710,6 +1743,66 @@ function captureSignatureFromStart(lines,start,identityName,identityEmail){
   if(!block)return null;
   return {start,end,block};
 }
+
+// Find signature owners from the visible block, not just the From header.
+// Some Outlook plain-text bodies split a visually single-line name across
+// separated first/last-name lines. Evidence from title/company/email is required.
+function captureVisibleNameInfo(lines,start){
+  const first=signatureCaptureLine(lines[start]).trim();
+  if(!first||signatureHardBoundary(first)||isClosingPhrase(first)||/^(?:hi|hello|dear|hey|good morning|good afternoon)\b/i.test(first))return null;
+  const single=v=>/^[A-Z][A-Za-z'’\-]{1,34}$/.test(v);
+  const following=[];
+  for(let j=start+1;j<lines.length&&j<=start+18&&following.length<8;j++){
+    const v=signatureCaptureLine(lines[j]).trim();
+    if(signatureHardBoundary(v))break;
+    if(v)following.push({index:j,value:v});
+  }
+  let name=cleanName(signatureNameFromLine(first)||personNameFromLine(first)||"");
+  let nameEnd=start;
+  if(!name&&single(first)&&following.length&&single(following[0].value)){
+    const combined=first+" "+following[0].value;
+    if(looksLikePersonName(combined)){
+      name=combined;
+      nameEnd=following[0].index;
+    }
+  }
+  if(!name)return null;
+  const after=following.filter(x=>x.index>nameEnd).slice(0,6).map(x=>x.value);
+  const shortField=v=>v.length<=75&&v.split(/\s+/).length<=9&&!/[!?]$/.test(v)&&!cleanEmail(v);
+  const titleIndex=after.slice(0,2).findIndex(v=>shortField(v)&&TITLE_WORDS.some(t=>v.toLowerCase().includes(t)));
+  if(titleIndex<0)return null;
+  const hasCompany=after.slice(titleIndex+1,titleIndex+4).some(v=>shortField(v)&&(structuredLegalCompanyEvidence(v)||structuredCompanyEvidence(v)));
+  if(!hasCompany)return null;
+  return {name,start};
+}
+function captureVisibleNameAnchors(lines,myEmail){
+  const anchors=[];
+  for(let i=0;i<lines.length;i++){
+    const candidate=captureVisibleNameInfo(lines,i);
+    if(!candidate)continue;
+    let email="";
+    for(let j=i+1;j<lines.length&&j<i+85;j++){
+      const v=signatureCaptureLine(lines[j]);
+      if(signatureHardBoundary(v))break;
+      const e=cleanEmail(v);
+      if(e&&!sameEmail(e,myEmail)){email=e;break}
+    }
+    if(email)anchors.push({...candidate,email});
+  }
+  return anchors;
+}
+function signatureContinuationAhead(lines,at){
+  // Preserve layout gaps inside signatures but not email headers/disclaimers.
+  for(let j=at+1;j<lines.length&&j<=at+22;j++){
+    const v=signatureCaptureLine(lines[j]).trim();
+    if(signatureHardBoundary(v))return false;
+    if(!v)continue;
+    if(cleanEmail(v)||structuredPhoneObservations(v).length||/\b[A-Z]{2}\s*\d{5}(?:-\d{4})?\b/.test(v)||
+       /\b(?:[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b/i.test(v)||/\bwww\.|https?:\/\//i.test(v))return true;
+  }
+  return false;
+}
+
 function captureSegmentSignatureBlocks(segment,myEmail){
   const identityEmail=cleanEmail(segment.email||"");
   const identityName=cleanName(segment.name||"");
@@ -1737,13 +1830,17 @@ function captureSegmentSignatureBlocks(segment,myEmail){
     }
   }
 
+  const localNames=new Map();
+  for(const a of captureVisibleNameAnchors(lines,myEmail)){
+    starts.push(a.start);localNames.set(a.start,a);
+  }
   const out=[],used=[];
   for(const start of [...new Set(starts)].sort((a,b)=>a-b)){
     if(used.some(r=>start>=r.start&&start<=r.end))continue;
     const cap=captureSignatureFromStart(lines,start,identityName,identityEmail);
     if(!cap)continue;
-    const visibleName=visibleNameAtLine(lines[start],identityName)||inferPersonName(cap.block)||identityName;
-    const email=identityEmail||cleanEmail(cap.block);
+    const visibleName=localNames.get(start)?.name||visibleNameAtLine(lines[start],identityName)||inferPersonName(cap.block)||identityName;
+    const email=localNames.get(start)?.email||cleanEmail(cap.block)||identityEmail;
     const parsed=v4ContactFromSignature(visibleName,email,cap.block);
     // Freeze Stage 1 output.  No parser may rewrite Notes or the source block.
     parsed.signature=cap.block;
@@ -2342,7 +2439,7 @@ async function scan(){try{
       // Stage 2: parse the already-frozen Stage 1 block.  Parsing may populate
       // fields, but it may never alter the preserved signature or Notes.
       const sourceBlock=c.rawSignatureBlock||c.parsed.signature||c.text||"";
-      const visibleIdentity=inferPersonName(sourceBlock)||c.name||[c.parsed.givenName,c.parsed.middleName,c.parsed.surname].filter(Boolean).join(" ");
+      const visibleIdentity=(c.name&&looksLikePersonName(c.name)?c.name:"")||inferPersonName(sourceBlock)||c.name||[c.parsed.givenName,c.parsed.middleName,c.parsed.surname].filter(Boolean).join(" ");
       const reparsed=v4ContactFromSignature(visibleIdentity,c.email||c.parsed.email||"",sourceBlock);
       reparsed.signature=sourceBlock;
       reparsed.personalNotes=sourceBlock;
