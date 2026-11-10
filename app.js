@@ -644,6 +644,19 @@ function structuredAddress(sig){
     if(street&&/[@<>]|https?:|^www\./i.test(street))street="";
     return {street,city,state:"",postalCode,countryOrRegion:"United Kingdom"};
   }
+  // A common Outlook line wrap places "Street, City," immediately before
+  // a separate "ST 12345" line. Keep the street rather than dropping it.
+  for(let i=1;i<ukLines.length;i++){
+    const stateZip=ukLines[i].match(/^([A-Z]{2})\s*,?\s*(\d{5}(?:-\d{4})?)$/);
+    if(!stateZip||!structuredStateAbbrev(stateZip[1]))continue;
+    const preceding=ukLines[i-1].replace(/[,\s]+$/g,"");
+    const parts=preceding.split(",").map(x=>x.trim()).filter(Boolean);
+    if(parts.length<2)continue;
+    const street=parts.slice(0,-1).join(", ");
+    const city=parts[parts.length-1];
+    if(!street||!city||!(/\d/.test(street)||/\b(?:street|road|rd|avenue|ave|drive|plaza|place|lane|boulevard)\b/i.test(street)))continue;
+    return {street,city,state:stateZip[1],postalCode:stateZip[2],countryOrRegion:"United States"};
+  }
   const legacy=address(sig);
   if(legacy.street&&legacy.city&&legacy.state&&legacy.postalCode)return legacy;
   const lines=norm(sig).split("\n").map(x=>String(x||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim()).filter(Boolean);
