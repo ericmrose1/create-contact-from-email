@@ -2082,8 +2082,11 @@ function renderCandidates(){
     const occ=c.candidateType==="referral"
       ? `<div class="muted">Contact information found in message</div>`
       : (lab.total>1?`<div class="muted">Signature occurrence ${lab.n} of ${lab.total}</div>`:`<div class="muted">Signature occurrence</div>`);
+    const logoInfo=c._imageEvidence
+      ? `<div class="muted">Signature image: ${html(c._imageEvidence.company||"detected — company not yet verified")}</div>`
+      : "";
     const el=document.createElement("div");el.className="candidate";
-    el.innerHTML=`<div class="candidate-head"><input type="checkbox" data-candidate="${i}"><div><div class="candidate-name">${html(c.name||"Unknown sender")}</div><div class="muted">${html(c.email||"No email found")}</div>${occ}</div></div><div class="preview">${html(c.parsed.signature||"No contact block confidently found")}</div>`;
+    el.innerHTML=`<div class="candidate-head"><input type="checkbox" data-candidate="${i}"><div><div class="candidate-name">${html(c.name||"Unknown sender")}</div><div class="muted">${html(c.email||"No email found")}</div>${occ}${logoInfo}</div></div><div class="preview">${html(c.parsed.signature||"No contact block confidently found")}</div>`;
     const cb=el.querySelector('input[data-candidate]');cb.addEventListener("change",()=>{if(!cb.checked)return;document.querySelectorAll('input[data-candidate]').forEach(x=>{if(x!==cb)x.checked=false})});box.appendChild(el)
   });
   $("candidateSection").hidden=false
@@ -2105,8 +2108,9 @@ function visibleSignatureTextFromNode(node){
     });
     clone.querySelectorAll("img").forEach(img=>{
       const alt=(img.getAttribute("alt")||img.getAttribute("title")||"").replace(/\s+/g," ").trim();
-      const safeAlt=isJunkResourceUrl(alt)?"":alt;
-      img.replaceWith(clone.ownerDocument.createTextNode(safeAlt?` ${safeAlt} `:" "));
+      // Image ALT text alone is not authoritative company data.
+      // Its image is inventoried and inspected separately.
+      img.replaceWith(clone.ownerDocument.createTextNode(" "));
     });
     clone.querySelectorAll("br").forEach(br=>br.replaceWith(clone.ownerDocument.createTextNode("\n")));
     clone.querySelectorAll("tr,p,div,li,table,blockquote").forEach(el=>el.appendChild(clone.ownerDocument.createTextNode("\n")));
@@ -2405,34 +2409,6 @@ function companyFromPlainDomainOnly(candidate){
   const inferred=v4CompanyFromDomain(candidate.email,p.businessHomePage||"");
   return !!inferred&&(!name||structuredCompanyLineKey(name)===structuredCompanyLineKey(inferred));
 }
-async function enrichLogoCompanies(item,html,candidateList){
-  const pending=(candidateList||[]).filter(companyFromPlainDomainOnly);
-  if(!pending.length)return;
-  const images=await imageSignatureSources(item,html||"");
-  if(!images.length)return;
-  let worker=null;
-  try{
-    const T=await loadTesseract();
-    worker=await T.createWorker("eng");
-    try{await worker.setParameters({tessedit_pageseg_mode:"6"});}catch(_){}
-    for(const src of images){
-      if(!pending.some(x=>!x._logoResolved))break;
-      const imageData=await sourceToDataUrl(src);
-      if(!imageData)continue;
-      let text="";
-      try{const r=await worker.recognize(imageData);text=r?.data?.text||"";}catch(_){continue}
-      for(const c of pending){
-        if(c._logoResolved)continue;
-        const confirmed=logoCompanyFromOcrText(text,c.email,c.parsed.businessHomePage||"");
-        if(!confirmed)continue;
-        c.parsed.companyName=confirmed;
-        c.parsed._debug={...(c.parsed._debug||{}),logoCompany:"OCR verified against signature email domain"};
-        c._logoResolved=true;
-      }
-    }
-  }finally{try{if(worker)await worker.terminate()}catch(_){}}
-}
-
 async function imageSignatureCandidate(item,htmlText,currentName,currentEmail,myEmail){
   if(!currentEmail || sameEmail(currentEmail,myEmail))return null;
   const sources=await imageSignatureSources(item,htmlText);
@@ -2509,6 +2485,10 @@ async function scan(){try{
   const from=item.from||{},body=await readBody(item);const myEmail=(Office.context.mailbox.userProfile?.emailAddress||"").toLowerCase();
 
   const textBody=body.text||body.plainText||"";
+  // Stage 1 inventories signature images before deciding on contact fields.
+  const imageInventory=window.SignatureImages?.inventory(body.html||"",from.displayName||"",from.emailAddress||"",myEmail,{
+    visibleSignatureTextFromNode,captureSignatureBlocks,norm
+  });
   const textSignatureBody=signatureDiscoveryText(textBody);
   const textSignatures=structuredDiscoverSignatures(
     textSignatureBody,from.displayName||"",from.emailAddress||"",myEmail
@@ -2541,6 +2521,14 @@ async function scan(){try{
   }
 
   candidates=[...signatureCandidates,...referralCandidates];
+  window.SignatureImages?.associate(candidates,imageInventory);
+  // OCR belongs to image inventory, not to a failure of text recognition.
+  if(candidates.some(c=>c._signatureImages?.length)){
+    status("Inspecting images within identified signatures…");
+    try{await window.SignatureImages?.recognize(item,candidates,{
+      loadTesseract,attachmentImageDataUrl,sourceToDataUrl,logoCompanyFromOcrText
+    })}catch(err){console.warn("Signature image inspection unavailable",err)}
+  }
 
   candidates=candidates.map(c=>{
     if(!c?.parsed)return c;
@@ -2561,9 +2549,9 @@ async function scan(){try{
     return c
   });
 
-  // A missing textual company can be recovered from a verified inline logo.
-  // OCR may fail (offline or unsupported attachment); never block the scan.
-  try{await enrichLogoCompanies(item,body.html||"",candidates)}catch(err){console.warn("Logo company enrichment unavailable",err)}
+  window.SignatureImages?.apply(candidates,{
+    companyFromPlainDomainOnly,structuredCompanyLineKey
+  });
   renderCandidates();
   status(`Found ${candidates.length} contact choice${candidates.length===1?"":"s"}. Select one to process. Your own messages/signature are ignored.`,candidates.length?"ok":"error");
 }catch(e){status(e.message||String(e),"error")}}
@@ -2601,6 +2589,18 @@ function editableFields(p,idx,existing=null){
     return `<div class="field ${["email","street"].includes(k)?"full":""}"><label>${html(l)}</label><input data-review="${idx}" data-field="${k}" value="${html(initial)}"></div>`
   }).join("")}</div>`
 }
+function imageEvidencePanel(p){
+  const e=p?._imageEvidence;
+  if(!e?.count)return "";
+  const message=e.status==="company-mismatch"
+   ? "The logo suggests "+e.company+", but the company field differs. Please review."
+   :e.company
+     ? "Company identified in signature logo: "+e.company
+     :e.status==="examined"
+       ? "Signature image examined, but company could not be verified. Please check."
+       : "Signature image found but could not be read. Please verify the company.";
+  return `<div class="muted">${html(message)}</div>`;
+}
 function unaccountedSignaturePanel(p){
   const value=String(p?._audit?.unaccountedText||"").trim();
   const shown=value||"None";
@@ -2624,7 +2624,7 @@ function renderReviews(items){
       actionArea=`<div class="toolbar"><button class="btn primary" data-action="create" data-index="${idx}">Create Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`;
     }
 
-    el.innerHTML=`${badge}<div class="candidate-name" style="margin-top:6px">${html([p.givenName,p.middleName,p.surname].filter(Boolean).join(" ")||it.name)}</div><div class="muted">${html(p.email||it.email||"")}</div><div class="signature-sticky"><div class="sig-title">Original signature block from email — compacted in Notes</div><pre>${html(p.signature||"No signature block confidently found")}</pre></div>${unaccountedSignaturePanel(p)}${diagnosticPanel(p)}${editableFields(p,idx,null)}${actionArea}`;
+    el.innerHTML=`${badge}<div class="candidate-name" style="margin-top:6px">${html([p.givenName,p.middleName,p.surname].filter(Boolean).join(" ")||it.name)}</div><div class="muted">${html(p.email||it.email||"")}</div><div class="signature-sticky"><div class="sig-title">Original signature block from email — compacted in Notes</div><pre>${html(p.signature||"No signature block confidently found")}</pre></div>${imageEvidencePanel(p)}${unaccountedSignaturePanel(p)}${diagnosticPanel(p)}${editableFields(p,idx,null)}${actionArea}`;
     box.appendChild(el);
   });
   $("reviewSection").hidden=false;
@@ -2634,7 +2634,7 @@ function renderReviews(items){
     const ta=document.querySelector(`textarea[data-review="${idx}"][data-field="personalNotes"]`);
     if(!ta)return;
     if(e.currentTarget.dataset.notesAction==="clear")ta.value="";
-    else ta.value=compactSignatureNotes(window.__reviewItems[idx]?.parsed?.signature||"");
+    else ta.value=(window.__reviewItems[idx]?.parsed?.personalNotes||"");
     ta.focus();
   }));
 }
