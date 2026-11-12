@@ -36,7 +36,7 @@ function inventory(html,fromName,fromEmail,myEmail,api){
     const im=images[Number(match[1])];
     if(im?.usable&&!refs.some(x=>x.id===im.id))refs.push(im);
    }
-   if(refs.length)occurrences.push({email:String(candidate.email||"").toLowerCase(),images:refs});
+   occurrences.push({email:String(candidate.email||"").toLowerCase(),images:refs});
   }
  }catch(err){console.warn("Signature image inventory failed",err)}
  return{images,occurrences};
@@ -54,6 +54,7 @@ function associate(candidates,inventory){
   // to the wrong person in a forwarded chain.
   if(occurrences.length!==targets.length)continue;
   targets.forEach((candidate,i)=>{
+   if(!occurrences[i].images.length)return;
    candidate._signatureImages=occurrences[i].images;
    candidate._imageEvidence={count:occurrences[i].images.length,status:"detected",company:""};
   });
