@@ -3,8 +3,13 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 const {test}=require('node:test'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'..','app.js'),'utf8').replace(/^import\s+[^\n]+\n/,'');
-const ctx={console,URL,Office:{onReady(){}},setTimeout,clearTimeout};
-vm.runInNewContext(source+'\n;globalThis.TEST_API={captureSignatureBlocks,structuredAddress,structuredPhones,signatureDiscoveryText,phoneForOutlook,graphPayload,fieldDiffs,compactSignatureNotes};',ctx,{filename:'app.js'});
+const ctx={console,URL,Office:{onReady(){},AsyncResultStatus:{Succeeded:'succeeded'}},setTimeout,clearTimeout};
+ctx.window={Tesseract:{createWorker:async()=>({
+ setParameters:async()=>{},
+ recognize:async()=>({data:{text:'ALDER\nNORTH\nWEST'}}),
+ terminate:async()=>{}
+})}};
+vm.runInNewContext(source+'\n;globalThis.TEST_API={captureSignatureBlocks,structuredAddress,structuredPhones,signatureDiscoveryText,phoneForOutlook,graphPayload,fieldDiffs,compactSignatureNotes,v4CompoundOfficeAddress,logoCompanyFromOcrText,enrichLogoCompanies,v4ContactFromSignature};',ctx,{filename:'app.js'});
 const p=ctx.TEST_API, own='owner@example.com';
 const first=[
 'Anna','','Marsh','','Sales & Marketing Director','','Northbridge US Inc',
@@ -118,4 +123,56 @@ test('UK signature and Graph Notes contain no extra empty lines',()=>{
  assert(!/\n\s*\n/.test(x.parsed.personalNotes));
  assert.equal(p.graphPayload(x.parsed).personalNotes,x.parsed.personalNotes);
  assert(x.rawSignatureBlock.includes('\n\n'));
+});
+
+test('a labeled line with physical and postal addresses uses two Street lines',()=>{
+ const sig=['Mona Pierce','Administrative Assistant',
+   'Jackson Office: 130 E. Cedar, Suite 103, Jackson, WY 83001 | P.O. Box 555, Jackson, WY 83001',
+   'Tel: 307.734.1908 | Fax: 307.733.3752','www.anw-law.com'].join('\n');
+ const parsed=p.v4ContactFromSignature('Mona Pierce','mona@anw-law.com',sig);
+ assert.equal(parsed.street,'130 E. Cedar, Suite 103\nP.O. Box 555');
+ assert.equal(parsed.city,'Jackson');
+ assert.equal(parsed.state,'WY');
+ assert.equal(parsed.postalCode,'83001');
+ assert.equal(parsed.countryOrRegion,'United States');
+ assert(!parsed.street.includes('Jackson Office'));
+ assert(!parsed._audit.unaccountedText.includes('P.O. Box'));
+ assert(!parsed._audit.unaccountedText.includes('130 E. Cedar'));
+ assert.equal(p.graphPayload(parsed).businessAddress.street,'130 E. Cedar, Suite 103\nP.O. Box 555');
+});
+test('addresses in different cities are not silently combined',()=>{
+ const input='Jackson Office: 130 E. Cedar, Jackson, WY 83001 | P.O. Box 555, Cheyenne, WY 82001';
+ assert.equal(p.v4CompoundOfficeAddress(input),null);
+});
+test('logo OCR requires confirmation by matching email domain initials',()=>{
+ assert.equal(p.logoCompanyFromOcrText('ALDER\nNORTH\nWEST','mona@anw-law.com'),'Alder North West');
+ assert.equal(p.logoCompanyFromOcrText('RANDOM DESIGN STUDIO','mona@anw-law.com'),'');
+ assert.equal(p.logoCompanyFromOcrText('ALDER NORTH WEST','mona@gmail.com'),'');
+});
+test('inline-logo company OCR enriches without changing source Notes or address',async()=>{
+ const sig=['Mona Pierce','Administrative Assistant',
+ 'Jackson Office: 130 E. Cedar, Suite 103, Jackson, WY 83001 | P.O. Box 555, Jackson, WY 83001',
+ 'Tel: 307.734.1908 | Fax: 307.733.3752','www.anw-law.com'].join('\n');
+ const parsed=p.v4ContactFromSignature('Mona Pierce','mona@anw-law.com',sig);
+ const oldNotes=parsed.personalNotes,oldSignature=parsed.signature;
+ const candidate={candidateType:'signature',email:'mona@anw-law.com',parsed};
+ assert.equal(parsed.companyName,'Anw Law');
+ const item={attachments:[{id:'logo',name:'company-logo.jpg',isInline:true}],
+ getAttachmentContentAsync(id,cb){cb({status:'succeeded',value:{format:'base64',content:'/9j/4A=='}})}};
+ await p.enrichLogoCompanies(item,'',[candidate]);
+ assert.equal(parsed.companyName,'Alder North West');
+ assert.equal(parsed.signature,oldSignature);
+ assert.equal(parsed.personalNotes,oldNotes);
+ assert.equal(p.graphPayload(parsed).companyName,'Alder North West');
+ assert.equal(p.graphPayload(parsed).businessAddress.street,'130 E. Cedar, Suite 103\nP.O. Box 555');
+});
+test('explicit legal company names are not overwritten by unrelated logo OCR',async()=>{
+ const sig=['Martin Finch','Designer','Pine Tree Design LLC','mfinch@ptd-law.com'].join('\n');
+ const parsed=p.v4ContactFromSignature('Martin Finch','mfinch@ptd-law.com',sig);
+ assert.equal(parsed.companyName,'Pine Tree Design LLC');
+ const candidate={candidateType:'signature',email:'mfinch@ptd-law.com',parsed};
+ const item={attachments:[{id:'logo',name:'logo.jpg',isInline:true}],
+ getAttachmentContentAsync(id,cb){cb({status:'succeeded',value:{format:'base64',content:'/9j/4A=='}})}};
+ await p.enrichLogoCompanies(item,'',[candidate]);
+ assert.equal(parsed.companyName,'Pine Tree Design LLC');
 });
