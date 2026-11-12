@@ -232,49 +232,90 @@ test('image inventory belongs to stage one and runs before stage two parsing',()
  assert(scan.indexOf('SignatureImages?.apply(')>scan.indexOf('candidates=candidates.map('));
 });
 
-test('HTML image inventory associates two distinct inline logos with two forwarded signatures',()=>{
- class FakeDOMParser{
-  parseFromString(markup){
-   return{body:{cloneNode(){
-    const state={text:markup};
-    const tags=[...markup.matchAll(/<img\s+[^>]+>/gi)].map(m=>m[0]);
-    const node={
-     ownerDocument:{createTextNode:value=>value},
-     querySelectorAll(tag){
-      if(tag!=='img')return [];
-      return tags.map(raw=>({
-       getAttribute(key){return raw.match(new RegExp(key+'="([^"]*)"','i'))?.[1]||''},
-       style:{},
-       replaceWith(value){state.text=state.text.replace(raw,value)}
-      }));
-     },
-     get text(){return state.text}
+function makeSignatureHtmlNode(initial){
+ const state={text:initial};
+ return{
+  get text(){
+   return state.text.replace(/<img[^>]*>/gi,'')
+    .split('\n').map(x=>x.trim()).filter(Boolean).join('\n');
+  },
+  ownerDocument:{createTextNode:x=>x},
+  cloneNode(){return makeSignatureHtmlNode(state.text)},
+  querySelectorAll(sel){
+   if(sel!=='img')return [];
+   return [...state.text.matchAll(/<img\s+[^>]*>/gi)].map(m=>{
+    const tag=m[0];
+    return{
+     getAttribute(key){return tag.match(new RegExp(key+'="([^"]*)"','i'))?.[1]||''},
+     style:{},
+     replaceWith(value){state.text=state.text.replace(tag,value)}
     };
-    return node;
-   }}};
+   });
   }
- }
- ctx.window.DOMParser=FakeDOMParser;
+ };
+}
+ctx.window.DOMParser=class{parseFromString(markup){return{body:makeSignatureHtmlNode(markup)}}};
+const htmlInventory=(html,fromName,fromEmail)=>images.inventory(html,fromName,fromEmail,own,{
+ captureSignatureBlocks:p.captureSignatureBlocks,norm:p.norm,visibleSignatureTextFromNode:node=>node.text
+});
+test('discover text signatures first, then associate images only inside their boundaries',()=>{
  const html=[
-  'From: Mona Pierce <mona@anw-law.com>','Thank you.','','Mona Pierce',
-  'Administrative Assistant',
+  'From: Mona Pierce <mona@anw-law.com>','Thank you for your message.',
+  '<img src="cid:unrelated-body-photo" width="600" height="250">',
+  'Kind regards,','Mona Pierce','Administrative Assistant',
   '<img src="cid:logo-one@demo" width="240" height="80">',
   'Tel: 307.734.1908','mona@anw-law.com',
   'From: Owner <owner@example.com>','Acknowledged.',
   'From: Peter Hale <peter@wcb.com>','Peter Hale','Sales Director','West Coast Build LLC',
   '<img src="cid:logo-two@demo" width="240" height="80">',
-  'Peter@wcb.com','Tel: 617.300.1234'
+  'peter@wcb.com','Tel: 617.300.1234'
  ].join('\n');
- const plain=html.replace(/<img[^>]*>/g,'');
- const inventory=images.inventory(html,'Mona Pierce','mona@anw-law.com','owner@example.com',{
-  captureSignatureBlocks:p.captureSignatureBlocks,
-  norm:p.norm,visibleSignatureTextFromNode:node=>node.text
- });
- assert.equal(inventory.images.length,2);
+ const inventory=htmlInventory(html,'Mona Pierce','mona@anw-law.com');
+ assert.equal(inventory.images.length,2,'body photo is never inventoried as signature content');
  assert.equal(inventory.occurrences.length,2);
- const candidates=p.captureSignatureBlocks(plain,'Mona Pierce','mona@anw-law.com','owner@example.com');
+ const candidates=p.captureSignatureBlocks(html.replace(/<img[^>]*>/g,''),'Mona Pierce','mona@anw-law.com',own);
  images.associate(candidates,inventory);
  assert.equal(candidates.find(x=>x.email==='mona@anw-law.com')._signatureImages[0].src,'cid:logo-one@demo');
  assert.equal(candidates.find(x=>x.email==='peter@wcb.com')._signatureImages[0].src,'cid:logo-two@demo');
  assert(candidates.every(x=>!x.rawSignatureBlock.includes('SIGIMAGE')));
+});
+test('a logo directly before the name is included only after a closing phrase',()=>{
+ const html=[
+  'From: Mona Pierce <mona@anw-law.com>','Please review the photos.',
+  '<img src="cid:body-photo" width="500" height="200">',
+  'Kind regards,',
+  '<img src="cid:prefix-logo" width="240" height="80">',
+  'Mona Pierce','Administrative Assistant',
+  'Tel: 307.734.1908','mona@anw-law.com'
+ ].join('\n');
+ const found=htmlInventory(html,'Mona Pierce','mona@anw-law.com');
+ assert.deepEqual(Array.from(found.images,x=>x.src),['cid:prefix-logo']);
+});
+test('a trailing logo is included before a message boundary but not before prose',()=>{
+ const html=[
+  'From: Mona Pierce <mona@anw-law.com>','Mona Pierce','Administrative Assistant',
+  'Tel: 307.734.1908','mona@anw-law.com',
+  '<img src="cid:signature-logo" width="240" height="80">',
+  'Subject: Forwarded conversation',
+  '<img src="cid:outside-signature" width="240" height="80">',
+  'This is unrelated mail content.'
+ ].join('\n');
+ const found=htmlInventory(html,'Mona Pierce','mona@anw-law.com');
+ assert.deepEqual(Array.from(found.images,x=>x.src),['cid:signature-logo']);
+});
+test('no signatures means no image inventory even if many pictures exist',()=>{
+ const html='From: No Signature <none@example.com>\n'+Array.from({length:8},(_,i)=>'<img src="cid:photo'+i+'">').join('\n');
+ const found=htmlInventory(html,'','');
+ assert.equal(found.occurrences.length,0);
+ assert.equal(found.images.length,0);
+});
+test('unknown image placement is not guessed as signature content',()=>{
+ const html=[
+  'From: Mona Pierce <mona@anw-law.com>','Mona Pierce','Administrative Assistant',
+  'Tel: 307.734.1908','mona@anw-law.com',
+  '<img src="cid:maybe-attachment" width="240" height="80">',
+  'See you soon.'
+ ].join('\n');
+ const found=htmlInventory(html,'Mona Pierce','mona@anw-law.com');
+ assert.equal(found.images.length,0);
 });
