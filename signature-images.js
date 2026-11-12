@@ -62,11 +62,35 @@ function inventory(html,fromName,fromEmail,myEmail,api){
    const end=plainToMarked[candidate.globalEnd??-1];
    const refs=[];
    if(start!==undefined&&end!==undefined&&end>=start){
-    // Only images inside this bounded signature are in its inventory.
+    // A text capture may include trailing short prose. Only treat an image as
+    // demonstrably in a signature when it precedes the last contact-field
+    // evidence, or when it is directly adjacent to a hard message boundary.
+    const contactEvidence=v=>/@[a-z0-9.-]+\.[a-z]{2,}/i.test(v)||
+      /(?:www\.|https?:\/\/)/i.test(v)||
+      /(?:^|\s)(?:tel|phone|mobile|cell|fax|direct)\s*:/i.test(v)||
+      /\b\d{3}[.\s-]?\d{3}[.\s-]?\d{4}\b/.test(v)||
+      /\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(v);
+    let lastEvidence=start;
     for(let k=start;k<=end;k++){
-     const m=isMarker(k);if(!m)continue;
+      if(!isMarker(k)&&contactEvidence(markedLines[k]))lastEvidence=k;
+    }
+    // Treat after-last-contact images exactly like trailing images below.
+    for(let k=start;k<=end;k++){
+     const m=isMarker(k);if(!m||k>lastEvidence)continue;
      const image=byIndex.get(Number(m[1]));
      if(image?.usable&&!refs.some(x=>x.id===image.id))refs.push(image);
+    }
+    // A logo between the final contact line and the next hard boundary can
+    // still belong to the signature. A prose sentence means it is ambiguous.
+    const last=lastEvidence;
+    let tailAt=last+1,tail=[];
+    while(tailAt<markedLines.length&&isMarker(tailAt)&&tail.length<3){
+      const image=byIndex.get(Number(isMarker(tailAt)[1]));
+      if(image?.usable)tail.push(image);
+      tailAt++;
+    }
+    if(tail.length&&(tailAt===markedLines.length||isBoundary(markedLines[tailAt]))){
+      for(const image of tail)if(!refs.some(x=>x.id===image.id))refs.push(image);
     }
 
     // A contiguous logo immediately after the final signature text belongs
