@@ -231,3 +231,50 @@ test('image inventory belongs to stage one and runs before stage two parsing',()
  assert(scan.indexOf('SignatureImages?.recognize(')<scan.indexOf('candidates=candidates.map('));
  assert(scan.indexOf('SignatureImages?.apply(')>scan.indexOf('candidates=candidates.map('));
 });
+
+test('HTML image inventory associates two distinct inline logos with two forwarded signatures',()=>{
+ class FakeDOMParser{
+  parseFromString(markup){
+   return{body:{cloneNode(){
+    const state={text:markup};
+    const tags=[...markup.matchAll(/<img\s+[^>]+>/gi)].map(m=>m[0]);
+    const node={
+     ownerDocument:{createTextNode:value=>value},
+     querySelectorAll(tag){
+      if(tag!=='img')return [];
+      return tags.map(raw=>({
+       getAttribute(key){return raw.match(new RegExp(key+'="([^"]*)"','i'))?.[1]||''},
+       style:{},
+       replaceWith(value){state.text=state.text.replace(raw,value)}
+      }));
+     },
+     get text(){return state.text}
+    };
+    return node;
+   }}};
+  }
+ }
+ ctx.window.DOMParser=FakeDOMParser;
+ const html=[
+  'From: Mona Pierce <mona@anw-law.com>','Thank you.','','Mona Pierce',
+  'Administrative Assistant',
+  '<img src="cid:logo-one@demo" width="240" height="80">',
+  'Tel: 307.734.1908','mona@anw-law.com',
+  'From: Owner <owner@example.com>','Acknowledged.',
+  'From: Peter Hale <peter@wcb.com>','Peter Hale','Sales Director','West Coast Build LLC',
+  '<img src="cid:logo-two@demo" width="240" height="80">',
+  'Peter@wcb.com','Tel: 617.300.1234'
+ ].join('\n');
+ const plain=html.replace(/<img[^>]*>/g,'');
+ const inventory=images.inventory(html,'Mona Pierce','mona@anw-law.com','owner@example.com',{
+  captureSignatureBlocks:p.captureSignatureBlocks,
+  norm:p.norm,visibleSignatureTextFromNode:node=>node.text
+ });
+ assert.equal(inventory.images.length,2);
+ assert.equal(inventory.occurrences.length,2);
+ const candidates=p.captureSignatureBlocks(plain,'Mona Pierce','mona@anw-law.com','owner@example.com');
+ images.associate(candidates,inventory);
+ assert.equal(candidates.find(x=>x.email==='mona@anw-law.com')._signatureImages[0].src,'cid:logo-one@demo');
+ assert.equal(candidates.find(x=>x.email==='peter@wcb.com')._signatureImages[0].src,'cid:logo-two@demo');
+ assert(candidates.every(x=>!x.rawSignatureBlock.includes('SIGIMAGE')));
+});
