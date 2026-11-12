@@ -2513,12 +2513,9 @@ async function scan(){try{
   let referralCandidates=referredContactCandidates(textBody,myEmail);
   if(!referralCandidates.length&&htmlVisible)referralCandidates=referredContactCandidates(htmlVisible,myEmail);
 
-  if(!signatureCandidates.length){
-    try{
-      const ocr=await imageSignatureCandidate(item,body.html||"",from.displayName||"",from.emailAddress||"",myEmail);
-      if(ocr)signatureCandidates=[ocr];
-    }catch(ocrErr){console.warn("Image signature OCR fallback failed",ocrErr)}
-  }
+  // No general whole-email image scan when text discovery finds no signature.
+  // Image-only contacts require a separately established signature region;
+  // unrelated attachments and forwarded images must never become contacts.
 
   candidates=[...signatureCandidates,...referralCandidates];
   window.SignatureImages?.associate(candidates,imageInventory);
