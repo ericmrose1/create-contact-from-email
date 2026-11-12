@@ -627,7 +627,38 @@ function structuredPhones(sig,country=""){
   return out;
 }
 
+// A labeled office address may contain both a physical street and a postal
+// P.O. Box on the same line. Parse complete address segments before assigning
+// any of them to the single Outlook businessAddress.street field.
+function v4CompoundOfficeAddress(sig){
+  for(const raw of norm(sig).split("\n")){
+    const line=String(raw||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim();
+    if(!line.includes("|"))continue;
+    const match=line.match(/^([A-Za-z][A-Za-z .'’-]{1,50}?\s+(?:Office|Branch|Location))\s*:\s*(.+)$/i);
+    const body=match?match[2]:line;
+    const segments=body.split(/\s*\|\s*/).map(x=>x.trim()).filter(Boolean);
+    if(segments.length<2||segments.length>4)continue;
+    const addresses=[];
+    for(const part of segments){
+      const m=part.match(/^(.+),\s*([A-Za-z][A-Za-z .'-]{1,60}),\s*([A-Z]{2})\s*,?\s*(\d{5}(?:-\d{4})?)$/i);
+      if(!m)break;
+      const street=m[1].trim(),city=m[2].trim(),state=structuredStateAbbrev(m[3]);
+      if(!state||!/\d/.test(street)||!city)break;
+      addresses.push({street,city,state,postalCode:m[4]});
+    }
+    if(addresses.length!==segments.length)continue;
+    const first=addresses[0];
+    if(!addresses.every(a=>a.city.toLowerCase()===first.city.toLowerCase()&&a.state===first.state&&a.postalCode===first.postalCode))continue;
+    const streetLines=[...new Set(addresses.map(a=>a.street))];
+    return {street:streetLines.join("\n"),city:first.city,state:first.state,postalCode:first.postalCode,
+      countryOrRegion:"United States",_sourceLine:line,_officeLabel:match?match[1]:""};
+  }
+  return null;
+}
+
 function structuredAddress(sig){
+  const compound=v4CompoundOfficeAddress(sig);
+  if(compound)return compound;
   // Royal Mail postcode syntax; never invent an American state for a UK address.
   const ukLines=norm(sig).split("\n").map(x=>String(x||"").replace(/\u00a0/g," ").trim()).filter(Boolean);
   const ukPost=/(?:\bGIR\s?0AA\b|\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b)/i;
@@ -931,6 +962,10 @@ function v4AuditSignature(signatureText,parsed,resolvedName,credentials){
   const normAuditLine=v=>String(v||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim();
 
   for(const line of lines){
+    if(parsed._sourceLine&&normAuditLine(line).toLowerCase()===normAuditLine(parsed._sourceLine).toLowerCase()){
+      recognized.push({text:line,category:"complete physical and postal address"});
+      continue;
+    }
     if(addressDecision?.branchLine&&
        normAuditLine(line).toLowerCase()===normAuditLine(addressDecision.branchLine).toLowerCase()){
       recognized.push({text:line,category:"branch/address selector"});
@@ -1334,6 +1369,7 @@ function v402BranchContext(signatureText,resolvedName){
 }
 
 function v402SelectOfficeAddress(parsed,signatureText,resolvedName){
+  if(parsed._sourceLine)return parsed;
   const candidates=v402OfficeAddressCandidates(signatureText);
   if(candidates.length<2)return parsed;
 
@@ -2333,6 +2369,70 @@ function ocrSignatureScore(text,currentName,currentEmail){
   if(t.split("\n").filter(Boolean).length>=4)score+=2;
   return score;
 }
+// A company whose name exists only in a signature logo is not fully recoverable
+// from plain text. OCR is a conservative optional enrichment. Accept only a
+// multiword organization whose initials or literal spelling agree with the
+// candidate's own email domain; unrelated logos in forwarded chains are ignored.
+function logoCompanyFromOcrText(ocrText,email,site=""){
+  const emailDomain=cleanEmail(email).split("@")[1]||"";
+  if(!emailDomain||/^(?:gmail|outlook|hotmail|yahoo|icloud|aol|live)\./i.test(emailDomain))return "";
+  const key=structuredDomainKey(email,site);
+  const stem=key.replace(/(?:law|legal|group|llp|inc|company|co)$/i,"");
+  const domainKeys=[key,stem].filter(k=>k.length>=3);
+  const lines=norm(ocrText||"").split("\n").map(x=>x.replace(/[^A-Za-z\s'’-]/g," ").replace(/\s+/g," ").trim())
+    .filter(x=>x.length>=3&&x.length<=70&&/^[A-Za-z][A-Za-z\s'’-]+$/.test(x)).slice(0,14);
+  const matches=[];
+  for(let i=0;i<lines.length;i++){
+    for(let j=i;j<Math.min(i+4,lines.length);j++){
+      const phrase=lines.slice(i,j+1).join(" ").trim();
+      const words=phrase.split(/\s+/).filter(Boolean);
+      if(words.length<2||words.length>5||words.some(w=>w.length<2))continue;
+      const normalized=words.join("").toLowerCase().replace(/[^a-z]/g,"");
+      const initials=words.map(w=>w[0]).join("").toLowerCase();
+      const matched=domainKeys.some(k=>k===normalized||(k===initials&&words.length>=3));
+      if(!matched)continue;
+      const name=words.map(w=>w.toLowerCase().replace(/^[a-z]/,c=>c.toUpperCase())).join(" ");
+      matches.push({name,wordCount:words.length});
+    }
+  }
+  matches.sort((a,b)=>b.wordCount-a.wordCount);
+  return matches[0]?.name||"";
+}
+function companyFromPlainDomainOnly(candidate){
+  const p=candidate?.parsed||{};
+  if(candidate?.candidateType==="referral"||!candidate?.email)return false;
+  const name=String(p.companyName||"").trim();
+  const inferred=v4CompanyFromDomain(candidate.email,p.businessHomePage||"");
+  return !!inferred&&(!name||structuredCompanyLineKey(name)===structuredCompanyLineKey(inferred));
+}
+async function enrichLogoCompanies(item,html,candidateList){
+  const pending=(candidateList||[]).filter(companyFromPlainDomainOnly);
+  if(!pending.length)return;
+  const images=await imageSignatureSources(item,html||"");
+  if(!images.length)return;
+  let worker=null;
+  try{
+    const T=await loadTesseract();
+    worker=await T.createWorker("eng");
+    try{await worker.setParameters({tessedit_pageseg_mode:"6"});}catch(_){}
+    for(const src of images){
+      if(!pending.some(x=>!x._logoResolved))break;
+      const imageData=await sourceToDataUrl(src);
+      if(!imageData)continue;
+      let text="";
+      try{const r=await worker.recognize(imageData);text=r?.data?.text||"";}catch(_){continue}
+      for(const c of pending){
+        if(c._logoResolved)continue;
+        const confirmed=logoCompanyFromOcrText(text,c.email,c.parsed.businessHomePage||"");
+        if(!confirmed)continue;
+        c.parsed.companyName=confirmed;
+        c.parsed._debug={...(c.parsed._debug||{}),logoCompany:"OCR verified against signature email domain"};
+        c._logoResolved=true;
+      }
+    }
+  }finally{try{if(worker)await worker.terminate()}catch(_){}}
+}
+
 async function imageSignatureCandidate(item,htmlText,currentName,currentEmail,myEmail){
   if(!currentEmail || sameEmail(currentEmail,myEmail))return null;
   const sources=await imageSignatureSources(item,htmlText);
@@ -2461,6 +2561,9 @@ async function scan(){try{
     return c
   });
 
+  // A missing textual company can be recovered from a verified inline logo.
+  // OCR may fail (offline or unsupported attachment); never block the scan.
+  try{await enrichLogoCompanies(item,body.html||"",candidates)}catch(err){console.warn("Logo company enrichment unavailable",err)}
   renderCandidates();
   status(`Found ${candidates.length} contact choice${candidates.length===1?"":"s"}. Select one to process. Your own messages/signature are ignored.`,candidates.length?"ok":"error");
 }catch(e){status(e.message||String(e),"error")}}
