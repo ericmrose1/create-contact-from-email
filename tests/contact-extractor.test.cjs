@@ -319,3 +319,12 @@ test('unknown image placement is not guessed as signature content',()=>{
  const found=htmlInventory(html,'Mona Pierce','mona@anw-law.com');
  assert.equal(found.images.length,0);
 });
+
+test('main scan cannot trigger a whole-email OCR fallback',()=>{
+ const start=source.indexOf('async function scan()');
+ const end=source.indexOf('const APP_CLIENT_ID=',start);
+ assert(start>=0&&end>start);
+ const scan=source.slice(start,end);
+ assert(!scan.includes('imageSignatureCandidate('));
+ assert(scan.indexOf('SignatureImages?.inventory(')<scan.indexOf('structuredDiscoverSignatures('));
+});
