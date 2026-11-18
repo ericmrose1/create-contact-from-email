@@ -1761,7 +1761,7 @@ function signatureAnchorEvidence(lines,start,identityEmail){
   if(TITLE_WORDS.some(x=>t.toLowerCase().includes(x)))return true;
   return false;
 }
-function captureSignatureFromStart(lines,start,identityName,identityEmail){
+function captureSignatureFromStart(lines,start,identityName,identityEmail,knownStarts=null){
   if(start<0||start>=lines.length)return null;
   let end=start;
   let blankRun=0,nonblank=0;
@@ -1769,6 +1769,7 @@ function captureSignatureFromStart(lines,start,identityName,identityEmail){
     const raw=signatureCaptureLine(lines[j]);
     const v=raw.trim();
     if(j>start&&signatureHardBoundary(v))break;
+    if(j>start&&knownStarts?.has(j))break;
     if(j>start&&v&&nameMatchesIdentity(v,identityName))break;
     if(!v){
       blankRun++;
@@ -1821,20 +1822,24 @@ function captureVisibleNameInfo(lines,start){
   return {name,start};
 }
 function captureVisibleNameAnchors(lines,myEmail){
-  const anchors=[];
+  // A signature is identified by its own contents, not by a matching sender
+  // name or the presence of an email address inside the signature.
+  const found=[];
   for(let i=0;i<lines.length;i++){
     const candidate=captureVisibleNameInfo(lines,i);
-    if(!candidate)continue;
+    if(candidate)found.push(candidate);
+  }
+  return found.map((candidate,index)=>{
+    const next=found[index+1]?.start??lines.length;
     let email="";
-    for(let j=i+1;j<lines.length&&j<i+85;j++){
+    for(let j=candidate.start+1;j<Math.min(next,candidate.start+60);j++){
       const v=signatureCaptureLine(lines[j]);
       if(signatureHardBoundary(v))break;
       const e=cleanEmail(v);
-      if(e&&!sameEmail(e,myEmail)){email=e;break}
+      if(e&&!sameEmail(e,myEmail)){email=e;break;}
     }
-    if(email)anchors.push({...candidate,email});
-  }
-  return anchors;
+    return {...candidate,email};
+  });
 }
 function signatureContinuationAhead(lines,at){
   // Preserve layout gaps inside signatures but not email headers/disclaimers.
@@ -1848,6 +1853,19 @@ function signatureContinuationAhead(lines,at){
   return false;
 }
 
+// Email metadata is useful evidence but must not determine whether a
+// signature is captured. Differing surnames require both first-name agreement
+// and an independently matching organization/domain before using sender email.
+function signatureSenderEmailCompatible(visibleName,identityName,identityEmail,signatureBlock){
+  if(!identityEmail)return false;
+  if(nameMatchesIdentity(visibleName,identityName))return true;
+  const a=nameParts(visibleName||""),b=nameParts(identityName||"");
+  const given=String(a.givenName||"").trim().toLowerCase();
+  if(!given||given.length<2||given!==String(b.givenName||"").trim().toLowerCase())return false;
+  return norm(signatureBlock||"").split("\n").some(line=>
+    !cleanEmail(line)&&structuredCompanyMatchesDomain(line,identityEmail)
+  );
+}
 function captureSegmentSignatureBlocks(segment,myEmail){
   const identityEmail=cleanEmail(segment.email||"");
   const identityName=cleanName(segment.name||"");
@@ -1882,11 +1900,20 @@ function captureSegmentSignatureBlocks(segment,myEmail){
   const out=[],used=[];
   for(const start of [...new Set(starts)].sort((a,b)=>a-b)){
     if(used.some(r=>start>=r.start&&start<=r.end))continue;
-    const cap=captureSignatureFromStart(lines,start,identityName,identityEmail);
+    const cap=captureSignatureFromStart(lines,start,identityName,identityEmail,new Set(starts));
     if(!cap)continue;
     const visibleName=localNames.get(start)?.name||visibleNameAtLine(lines[start],identityName)||inferPersonName(cap.block)||identityName;
-    const email=localNames.get(start)?.email||cleanEmail(cap.block)||identityEmail;
+    const explicitEmail=localNames.get(start)?.email||cleanEmail(cap.block)||"";
+    const useSenderEmail=!explicitEmail&&signatureSenderEmailCompatible(visibleName,identityName,identityEmail,cap.block);
+    const email=explicitEmail||(useSenderEmail?identityEmail:"");
     const parsed=v4ContactFromSignature(visibleName,email,cap.block);
+    if(!explicitEmail&&identityEmail&&!nameMatchesIdentity(visibleName,identityName)){
+      parsed._identityReview={
+        senderName:identityName,
+        signatureName:visibleName,
+        senderEmailUsed:useSenderEmail
+      };
+    }
     // Freeze the full Stage 1 source. Notes is a separate compact text copy.
     parsed.signature=cap.block;
     parsed.personalNotes=compactSignatureNotes(cap.block);
@@ -2326,6 +2353,7 @@ async function scan(){try{
       const reparsed=v4ContactFromSignature(visibleIdentity,c.email||c.parsed.email||"",sourceBlock);
       reparsed.signature=sourceBlock;
       reparsed.personalNotes=compactSignatureNotes(sourceBlock);
+      reparsed._identityReview=c.parsed._identityReview||null;
       reparsed._debug={...(c.parsed._debug||{}),...(reparsed._debug||{}),source:"Stage 2 parse of immutable signature block"};
       c.name=visibleIdentity||c.name;
       c.text=sourceBlock;
@@ -2375,6 +2403,14 @@ function editableFields(p,idx,existing=null){
     return `<div class="field ${["email","street"].includes(k)?"full":""}"><label>${html(l)}</label><input data-review="${idx}" data-field="${k}" value="${html(initial)}"></div>`
   }).join("")}</div>`
 }
+function signatureIdentityReviewPanel(parsed){
+  const r=parsed?._identityReview;
+  if(!r)return "";
+  const statement=r.senderEmailUsed
+    ? "Signature name differs from the email sender. Sender email was suggested because first name and company domain agree. Verify before saving."
+    : "Signature name differs from the email sender. No email address was inferred; verify or enter it before saving.";
+  return '<div class="muted">'+html(statement)+'</div>';
+}
 function imageEvidencePanel(p){
   const e=p?._imageEvidence;
   if(!e?.count)return "";
@@ -2410,7 +2446,7 @@ function renderReviews(items){
       actionArea=`<div class="toolbar"><button class="btn primary" data-action="create" data-index="${idx}">Create Contact</button><button class="btn" data-action="skip" data-index="${idx}">Skip</button></div>`;
     }
 
-    el.innerHTML=`${badge}<div class="candidate-name" style="margin-top:6px">${html([p.givenName,p.middleName,p.surname].filter(Boolean).join(" ")||it.name)}</div><div class="muted">${html(p.email||it.email||"")}</div><div class="signature-sticky"><div class="sig-title">Original signature block from email — compacted in Notes</div><pre>${html(p.signature||"No signature block confidently found")}</pre></div>${imageEvidencePanel(p)}${unaccountedSignaturePanel(p)}${diagnosticPanel(p)}${editableFields(p,idx,null)}${actionArea}`;
+    el.innerHTML=`${badge}<div class="candidate-name" style="margin-top:6px">${html([p.givenName,p.middleName,p.surname].filter(Boolean).join(" ")||it.name)}</div><div class="muted">${html(p.email||it.email||"")}</div><div class="signature-sticky"><div class="sig-title">Original signature block from email — compacted in Notes</div><pre>${html(p.signature||"No signature block confidently found")}</pre></div>${signatureIdentityReviewPanel(p)}${imageEvidencePanel(p)}${unaccountedSignaturePanel(p)}${diagnosticPanel(p)}${editableFields(p,idx,null)}${actionArea}`;
     box.appendChild(el);
   });
   $("reviewSection").hidden=false;

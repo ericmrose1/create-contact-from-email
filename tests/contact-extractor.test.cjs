@@ -328,3 +328,63 @@ test('main scan cannot trigger a whole-email OCR fallback',()=>{
  assert(!scan.includes('imageSignatureCandidate('));
  assert(scan.indexOf('SignatureImages?.inventory(')<scan.indexOf('structuredDiscoverSignatures('));
 });
+
+test('signature is captured despite a different sender surname and no signature email',()=>{
+ const body=[
+  'Thank you for the update.','Best,','Aria',
+  '','','Aria Chambers','','Senior Project Manager','Copper Vale, Inc.',
+  'p:','','(203) 555-0142',
+  'Confidentiality Notice: This communication is confidential.'
+ ].join('\n');
+ const cs=p.captureSignatureBlocks(p.signatureDiscoveryText(body),'Aria Temple','aria@coppervaleinc.com',own);
+ assert.equal(cs.length,1);
+ const c=cs[0];
+ assert.equal(c.name,'Aria Chambers');
+ assert.equal(c.email,'aria@coppervaleinc.com');
+ assert.equal(c.parsed.companyName,'Copper Vale, Inc.');
+ assert.equal(c.parsed.jobTitle,'Senior Project Manager');
+ assert.equal(c.parsed.businessPhone,'2035550142');
+ assert.equal(c.parsed.personalNotes.split('\n')[0],'Aria Chambers');
+ assert.equal(c.parsed._identityReview.signatureName,'Aria Chambers');
+ assert.equal(c.parsed._identityReview.senderEmailUsed,true);
+});
+test('two signatures by a different-surname signer stay independently selectable',()=>{
+ const stamp=[
+  'Aria Chambers','','Senior Project Manager','Copper Vale, Inc.','p:','203-555-0142'
+ ].join('\n');
+ const body=['I can help with your question.','Best,','Aria','',stamp,
+  'From: Owner <owner@example.com>','Sent: Friday','Subject: RE: Project','Thank you.',
+  'From: Aria Temple <aria@coppervaleinc.com>',
+  'Sent: Thursday','Subject: Project','Best regards,',stamp].join('\n');
+ const cs=p.captureSignatureBlocks(p.signatureDiscoveryText(body),'Aria Temple','aria@coppervaleinc.com',own);
+ assert.equal(cs.filter(c=>c.name==='Aria Chambers').length,2);
+ for(const c of cs.filter(c=>c.name==='Aria Chambers')){
+  assert.equal(c.parsed.companyName,'Copper Vale, Inc.');
+  assert(!c.rawSignatureBlock.includes('From:'));
+ }
+});
+test('never assign the sender email to an independently identified different person',()=>{
+ const body=[
+  'Hi,','Please coordinate with the project team.','',
+  'Kimberly Tate','Senior Project Manager','Harbor Design LLC','Office: 203-555-0176'
+ ].join('\n');
+ const cs=p.captureSignatureBlocks(p.signatureDiscoveryText(body),'Rita Solano','rita@northbridge.com',own);
+ const c=cs.find(x=>x.name==='Kimberly Tate');
+ assert(c);
+ assert.equal(c.email,'');
+ assert.equal(c.parsed.givenName,'Kimberly');
+ assert.equal(c.parsed.surname,'Tate');
+ assert.equal(c.parsed.businessPhone,'2035550176');
+ assert.equal(c.parsed._identityReview.senderEmailUsed,false);
+});
+test('explicit email inside signature overrides unrelated sender metadata',()=>{
+ const body=[
+  'Regards,','Kimberly Tate','Senior Project Manager','Harbor Design LLC',
+  'ktate@harbordesign.com','Office: 203-555-0176'
+ ].join('\n');
+ const cs=p.captureSignatureBlocks(p.signatureDiscoveryText(body),'Rita Solano','rita@northbridge.com',own);
+ const c=cs.find(x=>x.name==='Kimberly Tate');
+ assert(c);
+ assert.equal(c.email,'ktate@harbordesign.com');
+ assert.equal(c.parsed.email,'ktate@harbordesign.com');
+});
